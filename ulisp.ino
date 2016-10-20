@@ -1,6 +1,6 @@
-/* uLisp Version 1.3 - www.ulisp.com
-   Copyright (c) 2016 David Johnson-Davies
-   
+/* uLisp Version 1.4 - www.ulisp.com
+   David Johnson-Davies - www.technoblogy.com - 18th October 2016
+
    Licensed under the MIT license: https://opensource.org/licenses/MIT
 */
 
@@ -11,6 +11,7 @@
 
 #define checkoverflow
 #define resetautorun
+#define printfreespace
 
 // C Macros
 
@@ -54,14 +55,14 @@ enum stream { SERIALSTREAM, I2CSTREAM, SPISTREAM };
 
 enum function { SYMBOLS, NIL, TEE, LAMBDA, LET, LETSTAR, CLOSURE, SPECIAL_FORMS, QUOTE, DEFUN, DEFVAR,
 SETQ, LOOP, PUSH, POP, INCF, DECF, SETF, DOLIST, DOTIMES, FORMILLIS, WITHI2C, WITHSPI, TAIL_FORMS, PROGN,
-RETURN, IF, COND, WHEN, UNLESS, AND, OR, FUNCTIONS, NOT, NULLFN, CONS, ATOM, LISTP, CONSP, NUMBERP,
-STREAMP, EQ, CAR, FIRST, CDR, REST, CAAR, CADR, SECOND, CDAR, CDDR, CAAAR, CAADR, CADAR, CADDR, THIRD,
-CDAAR, CDADR, CDDAR, CDDDR, LENGTH, LIST, REVERSE, NTH, ASSOC, MEMBER, APPLY, FUNCALL, APPEND, MAPC,
-MAPCAR, ADD, SUBTRACT, MULTIPLY, DIVIDE, MOD, ONEPLUS, ONEMINUS, ABS, RANDOM, MAX, MIN, NUMEQ, LESS,
-LESSEQ, GREATER, GREATEREQ, NOTEQ, PLUSP, MINUSP, ZEROP, ODDP, EVENP, LOGAND, LOGIOR, LOGXOR, LOGNOT,
-ASH, LOGBITP, READ, EVAL, GLOBALS, LOCALS, MAKUNBOUND, BREAK, PRINT, PRINC, WRITEBYTE, READBYTE,
-RESTARTI2C, GC, SAVEIMAGE, LOADIMAGE, PINMODE, DIGITALREAD, DIGITALWRITE, ANALOGREAD, ANALOGWRITE,
-DELAY, MILLIS, NOTE, ENDFUNCTIONS };
+RETURN, IF, COND, WHEN, UNLESS, AND, OR, FUNCTIONS, NOT, NULLFN, CONS, ATOM, LISTP, CONSP, NUMBERP, 
+STREAMP, EQ, CAR, FIRST, CDR, REST, CAAR, CADR, SECOND, CDAR, CDDR, CAAAR, CAADR, CADAR, CADDR, THIRD, 
+CDAAR, CDADR, CDDAR, CDDDR, LENGTH, LIST, REVERSE, NTH, ASSOC, MEMBER, APPLY, FUNCALL, APPEND, MAPC, 
+MAPCAR, ADD, SUBTRACT, MULTIPLY, DIVIDE, MOD, ONEPLUS, ONEMINUS, ABS, RANDOM, MAX, MIN, NUMEQ, LESS, 
+LESSEQ, GREATER, GREATEREQ, NOTEQ, PLUSP, MINUSP, ZEROP, ODDP, EVENP, LOGAND, LOGIOR, LOGXOR, LOGNOT, 
+ASH, LOGBITP, READ, EVAL, GLOBALS, LOCALS, MAKUNBOUND, BREAK, PRINT, PRINC, WRITEBYTE, READBYTE, 
+RESTARTI2C, GC, ROOM, SAVEIMAGE, LOADIMAGE, CLS, PINMODE, DIGITALREAD, DIGITALWRITE, ANALOGREAD, 
+ANALOGWRITE, DELAY, MILLIS, NOTE, EDIT, ENDFUNCTIONS };
 
 // Typedefs
 
@@ -105,17 +106,21 @@ object *GCStack = NULL;
 char buffer[buflen+1];
 char BreakLevel = 0;
 char LastChar = 0;
+char LastPrint = 0;
+volatile char Escape = 0;
+char ExitEditor = 0;
 
 // Forward references
 object *tee;
 object *tf_progn (object *form, object *env);
 object *eval (object *form, object *env);
-object *read();
-void repl();
+object *read ();
+void repl(object *env);
 void printobject (object *form);
 char *lookupstring (unsigned int name);
-int lookupfn(unsigned int name);
-int builtin(char* n);
+int lookupfn (unsigned int name);
+int builtin (char* n);
+void Display (char c);
 
 // Set up workspace
 
@@ -218,9 +223,9 @@ void gc (object *form, object *env) {
   markobject(env);
   sweep();
   #if defined(debug1)
-  Serial.print('{');
-  Serial.print(freespace - start);
-  Serial.println('}');
+  pchar('{');
+  pint(freespace - start);
+  pchar('}');
   #endif
 }
 
@@ -277,8 +282,8 @@ int saveimage (object *arg) {
   unsigned int imagesize = compactimage(&arg);
   // Save to EEPROM
   if ((imagesize*4+8) > EEPROMsize) {
-    Serial.print(F("Error: Image size too large: "));
-    Serial.println(imagesize+2);
+    pfstring(F("Error: Image size too large: "));
+    pint(imagesize+2); pln();
     GCStack = NULL;
     longjmp(exception, 1);
   }
@@ -303,17 +308,17 @@ int loadimage () {
 // Error handling
 
 void error (const __FlashStringHelper *string) {
-  Serial.print(F("Error: "));
-  Serial.println(string);
+  pfstring(F("Error: "));
+  pfstring(string); pln();
   GCStack = NULL;
   longjmp(exception, 1);
 }
 
 void error2 (object *symbol, const __FlashStringHelper *string) {
-  Serial.print(F("Error: '"));
+  pfstring(F("Error: '"));
   printobject(symbol);
-  Serial.print("' ");
-  Serial.println(string);
+  pfstring(F("' "));
+  pfstring(string); pln();
   GCStack = NULL;
   longjmp(exception, 1);
 }
@@ -455,12 +460,12 @@ object *apply (object *function, object *args, object **env) {
   }
   if (listp(function) && issymbol(car(function), LAMBDA)) {
     function = cdr(function);
-    object *result = closure(0, NULL, NULL, function, args, env);
+    object *result = closure(1, NULL, NULL, function, args, env);
     return eval(result, *env);
   }
   if (listp(function) && issymbol(car(function), CLOSURE)) {
     function = cdr(function);
-    object *result = closure(0, NULL, car(function), cdr(function), args, env);
+    object *result = closure(1, NULL, car(function), cdr(function), args, env);
     return eval(result, *env);
   }
   error2(function, F("illegal function"));
@@ -1470,7 +1475,7 @@ object *fn_globals (object *args, object *env) {
   object *list = GlobalEnv;
   while (list != NULL) {
     printobject(car(car(list)));
-    Serial.println();
+    pln();
     list = cdr(list);
   }
   return nil;
@@ -1503,8 +1508,8 @@ object *fn_makunbound (object *args, object *env) {
 
 object *fn_break (object *args, object *env) {
   (void) args;
-  Serial.println();
-  Serial.println(F("Break!"));
+  pln();
+  pfstring(F("Break!")); pln();
   BreakLevel++;
   repl(env);
   BreakLevel--;
@@ -1513,10 +1518,10 @@ object *fn_break (object *args, object *env) {
 
 object *fn_print (object *args, object *env) {
   (void) env;
-  Serial.println();
+  pln();
   object *obj = first(args);
   printobject(obj);
-  Serial.print(' ');
+  pchar(' ');
   return obj;
 }
 
@@ -1536,7 +1541,7 @@ object *fn_writebyte (object *args, object *env) {
   if (args != NULL) stream = istream(first(args));
   if (stream>>8 == I2CSTREAM) return (I2Cwrite(value)) ? tee : nil;
   else if (stream>>8 == SPISTREAM) return number(SPI.transfer(value));
-  else if (stream == SERIALSTREAM<<8) Serial.write(value);
+  else if (stream == SERIALSTREAM<<8) pchar(value);
   else error(F("'write-byte' unknown stream type"));
   return nil;
 }
@@ -1552,7 +1557,7 @@ object *fn_readbyte (object *args, object *env) {
     if (i2cCount >= 0) i2cCount--;
     return number(I2Cread((i2cCount == 0) || last));
   } else if (stream>>8 == SPISTREAM) return number(SPI.transfer(0));
-  else if (stream == SERIALSTREAM<<8) return number(Serial.read());
+  else if (stream == SERIALSTREAM<<8) return number(gchar());
   else error(F("'read-byte' unknown stream type"));
   return nil;
 }
@@ -1580,12 +1585,18 @@ object *fn_gc (object *obj, object *env) {
   unsigned long start = micros();
   int initial = freespace;
   gc(obj, env);
-  Serial.print(F("Space: "));
-  Serial.print(freespace - initial);
-  Serial.print(F(" bytes, Time: "));
-  Serial.print(micros() - start);
-  Serial.println(F(" uS"));
+  pfstring(F("Space: "));
+  pint(freespace - initial);
+  pfstring(F(" bytes, Time: "));
+  pint(micros() - start);
+  pfstring(F(" uS")); pln();
   return nil;
+}
+
+object *fn_room (object *args, object *env) {
+  (void) args;
+  (void) env;
+  return number(freespace);
 }
 
 object *fn_saveimage (object *args, object *env) {
@@ -1597,6 +1608,13 @@ object *fn_loadimage (object *args, object *env) {
   (void) args;
   (void) env;
   return number(loadimage());
+}
+
+object *fn_cls(object *args, object *env) {
+  (void) env;
+  (void) args;
+  pchar(12);
+  return nil;
 }
 
 // Arduino procedures
@@ -1729,6 +1747,34 @@ object *fn_note (object *args, object *env) {
   return nil;
 }
 
+// Tree Editor
+
+object *fn_edit (object *args, object *env) {
+  object *fun = first(args);
+  object *pair = findvalue(fun, env);
+  ExitEditor = 0;
+  object *arg = edit(eval(fun, env));
+  cdr(pair) = arg;
+  return arg;
+}
+
+object *edit(object *fun) {
+  while (1) {
+    if (ExitEditor) return fun;
+    char c = gchar();
+    if (c == 'q') ExitEditor = 1;
+    else if (c == 'b') return fun;
+    else if (c == 'r') fun = read();
+    else if (c == '\r') { pfl(); printobject(fun); pln(); }
+    else if (c == 'c') fun = cons(read(), fun);
+    else if (!consp(fun)) pchar('!');
+    else if (c == 'd') fun = cons(car(fun), edit(cdr(fun)));
+    else if (c == 'a') fun = cons(edit(car(fun)), cdr(fun));
+    else if (c == 'x') fun = cdr(fun);
+    else pchar('?');
+  }
+}
+
 // Insert your own function definitions here
 
 
@@ -1845,16 +1891,19 @@ const char string107[] PROGMEM = "write-byte";
 const char string108[] PROGMEM = "read-byte";
 const char string109[] PROGMEM = "restart-i2c";
 const char string110[] PROGMEM = "gc";
-const char string111[] PROGMEM = "save-image";
-const char string112[] PROGMEM = "load-image";
-const char string113[] PROGMEM = "pinmode";
-const char string114[] PROGMEM = "digitalread";
-const char string115[] PROGMEM = "digitalwrite";
-const char string116[] PROGMEM = "analogread";
-const char string117[] PROGMEM = "analogwrite";
-const char string118[] PROGMEM = "delay";
-const char string119[] PROGMEM = "millis";
-const char string120[] PROGMEM = "note";
+const char string111[] PROGMEM = "room";
+const char string112[] PROGMEM = "save-image";
+const char string113[] PROGMEM = "load-image";
+const char string114[] PROGMEM = "cls";
+const char string115[] PROGMEM = "pinmode";
+const char string116[] PROGMEM = "digitalread";
+const char string117[] PROGMEM = "digitalwrite";
+const char string118[] PROGMEM = "analogread";
+const char string119[] PROGMEM = "analogwrite";
+const char string120[] PROGMEM = "delay";
+const char string121[] PROGMEM = "millis";
+const char string122[] PROGMEM = "note";
+const char string123[] PROGMEM = "edit";
 
 const tbl_entry_t lookup_table[] PROGMEM = {
   { string0, NULL, NIL, NIL },
@@ -1968,16 +2017,19 @@ const tbl_entry_t lookup_table[] PROGMEM = {
   { string108, fn_readbyte, 0, 2 },
   { string109, fn_restarti2c, 1, 2 },
   { string110, fn_gc, 0, 0 },
-  { string111, fn_saveimage, 0, 1 },
-  { string112, fn_loadimage, 0, 0 },
-  { string113, fn_pinmode, 2, 2 },
-  { string114, fn_digitalread, 1, 1 },
-  { string115, fn_digitalwrite, 2, 2 },
-  { string116, fn_analogread, 1, 1 },
-  { string117, fn_analogwrite, 2, 2 },
-  { string118, fn_delay, 1, 1 },
-  { string119, fn_millis, 0, 0 },
-  { string120, fn_note, 0, 3 },
+  { string111, fn_room, 0, 0 },
+  { string112, fn_saveimage, 0, 1 },
+  { string113, fn_loadimage, 0, 0 },
+  { string114, fn_cls, 0, 0 },
+  { string115, fn_pinmode, 2, 2 },
+  { string116, fn_digitalread, 1, 1 },
+  { string117, fn_digitalwrite, 2, 2 },
+  { string118, fn_analogread, 1, 1 },
+  { string119, fn_analogwrite, 2, 2 },
+  { string120, fn_delay, 1, 1 },
+  { string121, fn_millis, 0, 0 },
+  { string122, fn_note, 0, 3 },
+  { string123, fn_edit, 1, 1 },
 };
 
 // Table lookup functions
@@ -2017,8 +2069,9 @@ object *eval (object *form, object *env) {
   // Enough space?
   if (freespace < 20) gc(form, env);
   if (_end != 0xA5) error(F("Stack overflow"));
-  // Break
-  if (Serial.read() == '~') error(F("Break!"));
+  // Escape
+  if (Escape) { Escape = 0; error(F("Escape!"));}
+  if (Serial.read() == '~') error(F("Escape!"));
   
   if (form == NULL) return nil;
 
@@ -2134,64 +2187,102 @@ object *eval (object *form, object *env) {
 
 // Input/Output
 
+// Print functions
+
+void pchar (char c) {
+  LastPrint = c;
+  Serial.write(c);
+  if (c == '\r') Serial.write('\n');
+}
+
+void pstring (char *s) {
+  while (*s) pchar(*s++);
+}
+
+void pfstring (const __FlashStringHelper *s) {
+  PGM_P p = reinterpret_cast<PGM_P>(s);
+  while (1) {
+    char c = pgm_read_byte(p++);
+    if (c == 0) return;
+    pchar(c);
+  }
+}
+
+void pint (int i) {
+  int lead = 0;
+  for (int d=10000; d>0; d=d/10) {
+    if (i<0) { pchar('-');i = -i;}
+    int j = i/d;
+    if (j!=0 || lead || d==1) { pchar(j+'0'); lead=1;}
+    i = i - j*d;
+  }
+}
+
+void pln () {
+  pchar('\r');
+}
+
+void pfl () {
+  if (LastPrint != '\r') pchar('\r');
+}
+
 void printobject(object *form){
   #if defined(debug2)
-  Serial.print('[');Serial.print((int)form);Serial.print(']');
+  pchar('[');pint((int)form);pchar(']');
   #endif
-  if (form == NULL) Serial.print(F("nil"));
-  else if (listp(form) && issymbol(car(form), CLOSURE)) Serial.print(F("<closure>"));
+  if (form == NULL) pfstring(F("nil"));
+  else if (listp(form) && issymbol(car(form), CLOSURE)) pfstring(F("<closure>"));
   else if (listp(form)) {
-    Serial.print('(');
+    pchar('(');
     printobject(car(form));
     form = cdr(form);
     while (form != NULL && listp(form)) {
-      Serial.print(' ');
+      pchar(' ');
       printobject(car(form));
       form = cdr(form);
     }
     if (form != NULL) {
-      Serial.print(F(" . "));
+      pfstring(F(" . "));
       printobject(form);
     }
-    Serial.print(')');
+    pchar(')');
   } else if (form->type == NUMBER) {
-    Serial.print(integer(form));
+    pint(integer(form));
   } else if (form->type == SYMBOL) {
-    Serial.print(name(form));
+    pstring(name(form));
   } else if (form->type == STREAM) {
-    Serial.print(F("<"));
-    if ((form->integer)>>8 == SPISTREAM) Serial.print(F("spi"));
-    else if ((form->integer)>>8 == I2CSTREAM) Serial.print(F("i2c"));
-    else Serial.print(F("serial"));
-    Serial.print(F("-stream #x"));
-    Serial.print(form->integer & 0xFF, HEX);
-    Serial.print('>');
+    pfstring(F("<"));
+    if ((form->integer)>>8 == SPISTREAM) pfstring(F("spi"));
+    else if ((form->integer)>>8 == I2CSTREAM) pfstring(F("i2c"));
+    else pfstring(F("serial"));
+    pfstring(F("-stream "));
+    pint(form->integer & 0xFF);
+    pchar('>');
   } else
     error(F("Error in print."));
 }
 
-int Getc () {
+int gchar () {
   if (LastChar) { 
-    int temp = LastChar;
+    char temp = LastChar;
     LastChar = 0;
     return temp;
   }
   while (!Serial.available());
-  int temp = Serial.read();
-  Serial.print((char)temp);
-  // if (temp == 13) Serial.println();
+  char temp = Serial.read();
+  if (temp != '\r') pchar(temp);
   return temp;
 }
 
 object *nextitem() {
-  int ch = Getc();
-  while(isspace(ch)) ch = Getc();
+  int ch = gchar();
+  while(isspace(ch)) ch = gchar();
 
   if (ch == ';') {
-    while(ch != '(') ch = Getc();
+    while(ch != '(') ch = gchar();
     ch = '(';
   }
-  if (ch == '\n') ch = Getc();
+  if (ch == '\r') ch = gchar();
   if (ch == EOF) exit(0);
 
   if (ch == ')') return (object *)KET;
@@ -2204,18 +2295,18 @@ object *nextitem() {
   unsigned int result = 0;
   if (ch == '+') {
     buffer[index++] = ch;
-    ch = Getc();
+    ch = gchar();
   } else if (ch == '-') {
     sign = -1;
     buffer[index++] = ch;
-    ch = Getc();
+    ch = gchar();
   } else if (ch == '#') {
-    ch = Getc() | 0x20;
+    ch = gchar() | 0x20;
     if (ch == 'b') base = 2;
     else if (ch == 'o') base = 8;
     else if (ch == 'x') base = 16;
     else error(F("Illegal character after #"));
-    ch = Getc();
+    ch = gchar();
   }
   int isnumber = (digitvalue(ch)<base);
   buffer[2] = '\0'; // In case variable is one letter
@@ -2225,7 +2316,7 @@ object *nextitem() {
     int temp = digitvalue(ch);
     result = result * base + temp;
     isnumber = isnumber && (digitvalue(ch)<base);
-    ch = Getc();
+    ch = gchar();
   }
 
   buffer[index] = '\0';
@@ -2234,7 +2325,7 @@ object *nextitem() {
 
   if (isnumber) {
     if (base == 10 && result > ((unsigned int)32767+(1-sign)/2)) {
-      Serial.println();
+      pln();
       error(F("Number out of range"));
     }
     return number(result*sign);
@@ -2286,8 +2377,8 @@ void setup() {
   while (!Serial);  // wait for Serial to initialize
   initworkspace();
   initenv();
-  _end = 0xA5;
-  Serial.println(F("uLisp 1.3"));
+  _end = 0xA5;      // Canary to check stack
+  pfstring(F("uLisp 1.4")); pln();
 }
 
 // Read/Evaluate/Print loop
@@ -2296,21 +2387,25 @@ void repl(object *env) {
   for (;;) {
     randomSeed(micros());
     gc(NULL, env);
-    Serial.print(freespace);
+    #if defined (printfreespace)
+    pint(freespace);
+    #endif
     if (BreakLevel) {
-      Serial.print(F(" : "));
-      Serial.print(BreakLevel);
+      pfstring(F(" : "));
+      pint(BreakLevel);
     }
-    Serial.print(F("> "));
+    pfstring(F("> "));
     object *line = read();
-    if (BreakLevel && line == nil) { Serial.println(); return; }
-    Serial.println();
+    if (BreakLevel && line == nil) { pln(); return; }
     if (line == (object *)KET) error(F("Unmatched right bracket"));
     push(line, GCStack);
-    printobject(eval(line,env));
+    pfl();
+    line = eval(line, env);
+    pfl();
+    printobject(line);
     pop(GCStack);
-    Serial.println();
-    Serial.println();
+    pln();
+    pln();
   }
 }
 
