@@ -1,5 +1,5 @@
-/* uLisp Version 1.5 - www.ulisp.com
-   David Johnson-Davies - www.technoblogy.com - 24th January 2017
+/* uLisp Version 1.5a - www.ulisp.com
+   David Johnson-Davies - www.technoblogy.com - 2nd March 2017
 
    Licensed under the MIT license: https://opensource.org/licenses/MIT
 */
@@ -50,7 +50,7 @@ const int workspacesize = (RAMsize - RAMsize/4 - 268)/4;
 const int EEPROMsize = E2END;
 
 const int buflen = 17;  // Length of longest symbol + 1
-enum type {ZERO, SYMBOL, NUMBER, STRING, STREAM, PAIR };  // PAIR must be last
+enum type {ZERO, SYMBOL, NUMBER, STREAM, STRING, PAIR };  // STRING and PAIR must be last
 enum token { UNUSED, BRA, KET, QUO, DOT };
 enum stream { SERIALSTREAM, I2CSTREAM, SPISTREAM };
 
@@ -241,7 +241,7 @@ typedef struct {
   unsigned int eval;
   unsigned int datasize;
   unsigned int globalenv;
-  unsigned int tee;
+  unsigned int gcstack;
   char data[];
 } struct_image;
 
@@ -251,7 +251,7 @@ void movepointer (object *from, object *to) {
   for (int i=0; i<workspacesize; i++) {
     object *obj = &workspace[i];
     int type = (obj->type) & 0x7FFF;
-    if (marked(obj) && type >= PAIR) {
+    if (marked(obj) && (type >= STRING || type==ZERO)) {
       if (car(obj) == (object *)((unsigned int)from | 0x8000)) 
         car(obj) = (object *)((unsigned int)to | 0x8000);
       if (cdr(obj) == from) cdr(obj) = to;
@@ -275,7 +275,6 @@ int compactimage (object **arg) {
       movepointer(obj, firstfree);
       if (GlobalEnv == obj) GlobalEnv = firstfree;
       if (GCStack == obj) GCStack = firstfree;
-      if (tee == obj) tee = firstfree;
       if (*arg == obj) *arg = firstfree;
       while (marked(firstfree)) firstfree++;
     }
@@ -296,7 +295,7 @@ int saveimage (object *arg) {
   eeprom_write_word(&image.datasize, imagesize);
   eeprom_write_word(&image.eval, (unsigned int)arg);
   eeprom_write_word(&image.globalenv, (unsigned int)GlobalEnv);
-  eeprom_write_word(&image.tee, (unsigned int)tee);
+  eeprom_write_word(&image.gcstack, (unsigned int)GCStack);
   eeprom_write_block(workspace, image.data, imagesize*4);
   return imagesize+2;
 }
@@ -305,7 +304,7 @@ int loadimage () {
   unsigned int imagesize = eeprom_read_word(&image.datasize);
   if (imagesize == 0 || imagesize == 0xFFFF) error(F("No saved image"));
   GlobalEnv = (object *)eeprom_read_word(&image.globalenv);
-  tee = (object *)eeprom_read_word(&image.tee) ;
+  GCStack = (object *)eeprom_read_word(&image.gcstack);
   eeprom_read_block(workspace, image.data, imagesize*4);
   gc(NULL, NULL);
   return imagesize+2;
@@ -2519,7 +2518,7 @@ void setup() {
   initworkspace();
   initenv();
   _end = 0xA5;      // Canary to check stack
-  pfstring(F("uLisp 1.5")); pln();
+  pfstring(F("uLisp 1.5a")); pln();
 }
 
 // Read/Evaluate/Print loop
