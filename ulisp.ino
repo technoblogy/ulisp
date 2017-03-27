@@ -2031,11 +2031,10 @@ object *edit(object *fun) {
   }
 }
 
-// Prettyprinter
+// Pretty printer
 
 const int ppindent = 2;
-const int defaultppwidth = 80;
-int ppwidth;
+int ppwidth = 80;
 
 int atomwidth (object *obj) {
   if (obj == NULL) return 3;
