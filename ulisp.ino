@@ -6,6 +6,7 @@
 
 #include <setjmp.h>
 #include <SPI.h>
+#include <avr/eeprom.h>
 
 // Compile options
 
