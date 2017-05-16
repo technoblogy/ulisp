@@ -6,6 +6,7 @@
 
 #include <setjmp.h>
 #include <SPI.h>
+#include <avr/eeprom.h>
 
 // Compile options
 
@@ -153,8 +154,24 @@ void repl(object *env);
 void printobject (object *form, pfun_t pfun);
 char *lookupbuiltin (symbol_t name);
 int lookupfn (symbol_t name);
+int lookupmin(symbol_t name);
+int lookupmax(symbol_t name);
 int builtin (char* n);
 void Display (char c);
+void error (const __FlashStringHelper *);
+void pfstring (const __FlashStringHelper *);
+void pint (int i);
+void pln ();
+void pfl ();
+void pchar (char c);
+int gchar ();
+object *apply (object *function, object *args, object **env);
+char *lookupsymbol (symbol_t name);
+void deletesymbol (symbol_t name);
+object *edit(object *fun);
+int subwidthlist (object *form, int w);
+void superprint (object *form, int lm);
+void supersub (object *form, int lm, int super);
 
 // Set up workspace
 
