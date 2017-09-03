@@ -1,11 +1,12 @@
-/* uLisp Version 1.9 - www.ulisp.com
-   David Johnson-Davies - www.technoblogy.com - 16th May 2017
+/* uLisp Version 1.9b - www.ulisp.com
+   David Johnson-Davies - www.technoblogy.com - 3rd September 2017
 
    Licensed under the MIT license: https://opensource.org/licenses/MIT
 */
 
 #include <setjmp.h>
 #include <SPI.h>
+#include <limits.h>
 
 // Compile options
 
@@ -35,9 +36,9 @@
 #define characterp(x)      ((x)->type == CHARACTER)
 #define streamp(x)         ((x)->type == STREAM)
 
-#define mark(x)            (car(x) = (object *)(((unsigned int)(car(x))) | MARKBIT))
-#define unmark(x)          (car(x) = (object *)(((unsigned int)(car(x))) & ~MARKBIT))
-#define marked(x)          ((((unsigned int)(car(x))) & MARKBIT) != 0)
+#define mark(x)            (car(x) = (object *)(((uintptr_t)(car(x))) | MARKBIT))
+#define unmark(x)          (car(x) = (object *)(((uintptr_t)(car(x))) & ~MARKBIT))
+#define marked(x)          ((((uintptr_t)(car(x))) & MARKBIT) != 0)
 #define MARKBIT            1
 
 #define setflag(x)         (Flags = Flags | 1<<(x))
@@ -119,6 +120,8 @@ typedef void (*pfun_t)(char);
 
 object Workspace[WORKSPACESIZE] WORDALIGNED;
 char SymbolTable[SYMBOLTABLESIZE];
+extern uint8_t _end;
+typedef int BitOrder;
 
 // Global variables
 
@@ -126,7 +129,6 @@ jmp_buf exception;
 unsigned int Freespace = 0;
 object *Freelist;
 char *SymbolTop = SymbolTable;
-extern uint8_t _end;
 unsigned int I2CCount;
 unsigned int TraceFn[TRACEMAX];
 unsigned int TraceDepth[TRACEMAX];
@@ -268,7 +270,7 @@ void gc (object *form, object *env) {
   markobject(env);
   sweep();
   #if defined(printgcs)
-  pserial('{'); pint(Freespace - start, pserial); pserial('}');
+  pfl(pserial); pserial('{'); pint(Freespace - start, pserial); pserial('}');
   #endif
 }
 
@@ -358,7 +360,8 @@ int saveimage (object *arg) {
   return imagesize;
 }
 
-int loadimage () {
+int loadimage (object *filename) {
+  (void) filename;
   unsigned int imagesize = eeprom_read_word(&image.datasize);
   if (imagesize == 0 || imagesize == 0xFFFF) error(PSTR("No saved image"));
   GlobalEnv = (object *)eeprom_read_word(&image.globalenv);
@@ -376,7 +379,7 @@ void autorunimage () {
   object *nullenv = NULL;
   object *autorun = (object *)eeprom_read_word(&image.eval);
   if (autorun != NULL && (unsigned int)autorun != 0xFFFF) {
-    loadimage();
+    loadimage(nil);
     apply(autorun, NULL, &nullenv);
   }
 }
@@ -565,17 +568,20 @@ void indent (int spaces) {
 
 void buildstring (char ch, int *chars, object **head) {
   static object* tail;
+  static uint8_t shift;
   if (*chars == 0) {
-    *chars = ch<<8;
+    shift = (sizeof(int)-1)*8;
+    *chars = ch<<shift;
     object *cell = myalloc();
     if (*head == NULL) *head = cell; else tail->car = cell;
     cell->car = NULL;
     cell->integer = *chars;
     tail = cell;
   } else {
-    *chars = *chars | ch;
+    shift = shift - 8;
+    *chars = *chars | ch<<shift;
     tail->integer = *chars;
-    *chars = 0;
+    if (shift == 0) *chars = 0;
   }
 }
 
@@ -599,8 +605,9 @@ int stringlength (object *form) {
   form = cdr(form);
   while (form != NULL) {
     int chars = form->integer;
-    if (chars & 0xFF) length++;
-    if (chars & 0xFF00) length++;
+    for (int i=(sizeof(int)-1)*8; i>=0; i=i-8) {
+      if (chars>>i & 0xFF) length++;
+    }
     form = car(form);
   }
   return length;
@@ -608,15 +615,15 @@ int stringlength (object *form) {
 
 char nthchar (object *string, int n) {
   object *arg = cdr(string);
-  int top = n>>1;
+  int top;
+  if (sizeof(int) == 4) { top = n>>2; n = 3 - (n&3); }
+  else { top = n>>1; n = 1 - (n&1); }
   for (int i=0; i<top; i++) {
     if (arg == NULL) return 0;
     arg = car(arg);
   }
   if (arg == NULL) return 0;
-  char ch;
-  if (n&1) ch = (arg->integer) & 0xFF; else ch = (arg->integer)>>8 & 0xFF;
-  return ch;
+  return (arg->integer)>>(n*8) & 0xFF;
 }
 
 // Lookup variable in environment
@@ -1046,8 +1053,8 @@ object *sp_incf (object *args, object *env) {
   args = cdr(args);
   if (args != NULL) increment = integer(eval(first(args), env));
   #if defined(checkoverflow)
-  if (increment < 1) { if (-32768 - increment > result) error(PSTR("'incf' arithmetic overflow")); }
-  else { if (32767 - increment < result) error(PSTR("'incf' arithmetic overflow")); }
+  if (increment < 1) { if (INT_MIN - increment > result) error(PSTR("'incf' arithmetic overflow")); }
+  else { if (INT_MAX - increment < result) error(PSTR("'incf' arithmetic overflow")); }
   #endif
   result = result + increment;
   *loc = number(result);
@@ -1061,8 +1068,8 @@ object *sp_decf (object *args, object *env) {
   args = cdr(args);
   if (args != NULL) decrement = integer(eval(first(args), env));
   #if defined(checkoverflow)
-  if (decrement < 1) { if (32767 + decrement < result) error(PSTR("'decf' arithmetic overflow")); }
-  else { if (-32768 + decrement > result) error(PSTR("'decf' arithmetic overflow")); }
+  if (decrement < 1) { if (INT_MAX + decrement < result) error(PSTR("'decf' arithmetic overflow")); }
+  else { if (INT_MIN + decrement > result) error(PSTR("'decf' arithmetic overflow")); }
   #endif
   result = result - decrement;
   *loc = number(result);
@@ -1131,7 +1138,7 @@ object *sp_trace (object *args, object *env) {
   while (args != NULL) {
       trace(first(args)->name);
       args = cdr(args);
-    }
+  }
   int i = 0;
   while (i < TRACEMAX) {
     if (TraceFn[i] != 0) args = cons(symbol(TraceFn[i]), args);
@@ -1165,7 +1172,7 @@ object *sp_formillis (object *args, object *env) {
   if (param != NULL) total = integer(first(param));
   eval(tf_progn(cdr(args),env), env);
   do now = millis() - start; while (now < total);
-  if (now <= 32767) return number(now);
+  if (now <= INT_MAX) return number(now);
   return nil;
 }
 
@@ -1181,11 +1188,11 @@ object *sp_withserial (object *args, object *env) {
   object *pair = cons(var, stream(SERIALSTREAM, address));
   push(pair,env);
   #if defined(__AVR_ATmega1284P__)
-  if (address == 1) Serial1.begin(baud*100);
+  if (address == 1) Serial1.begin((long)baud*100);
   #elif defined(__AVR_ATmega2560__)
-  if (address == 1) Serial1.begin(baud*100);
-  else if (address == 2) Serial2.begin(baud*100);
-  else if (address == 3) Serial3.begin(baud*100);
+  if (address == 1) Serial1.begin((long)baud*100);
+  else if (address == 2) Serial2.begin((long)baud*100);
+  else if (address == 3) Serial3.begin((long)baud*100);
   #endif
   object *forms = cdr(args);
   object *result = eval(tf_progn(forms,env), env);
@@ -1244,7 +1251,7 @@ object *sp_withspi (object *args, object *env) {
   }
   pinMode(pin, OUTPUT);
   digitalWrite(pin, LOW);
-  SPI.setBitOrder(bitorder);
+  SPI.setBitOrder((BitOrder)bitorder);
   SPI.setClockDivider(divider);
   SPI.setDataMode(mode);
   object *forms = cdr(args);
@@ -1591,7 +1598,8 @@ object *fn_mapcar (object *args, object *env) {
       list1 = cdr(list1);
       list2 = cdr(list2);
     }
-  } else {
+    pop(GCStack);
+  } else if (list1 != NULL) {
     while (list1 != NULL) {
       object *result = apply(function, cons(car(list1),NULL), &env);
       object *obj = cons(result,NULL);
@@ -1605,8 +1613,8 @@ object *fn_mapcar (object *args, object *env) {
       }
       list1 = cdr(list1);
     }
+    pop(GCStack);
   }
-  pop(GCStack);
   return head;
 }
 
@@ -1618,8 +1626,8 @@ object *fn_add (object *args, object *env) {
   while (args != NULL) {
     int temp = integer(car(args));
     #if defined(checkoverflow)
-    if (temp < 1) { if (-32768 - temp > result) error(PSTR("'+' arithmetic overflow")); }
-    else { if (32767 - temp < result) error(PSTR("'+' arithmetic overflow")); }
+    if (temp < 1) { if (INT_MIN - temp > result) error(PSTR("'+' arithmetic overflow")); }
+    else { if (INT_MAX - temp < result) error(PSTR("'+' arithmetic overflow")); }
     #endif
     result = result + temp;
     args = cdr(args);
@@ -1633,15 +1641,15 @@ object *fn_subtract (object *args, object *env) {
   args = cdr(args);
   if (args == NULL) {
     #if defined(checkoverflow)
-    if (result == -32768) error(PSTR("'-' arithmetic overflow"));
+    if (result == INT_MIN) error(PSTR("'-' arithmetic overflow"));
     #endif
     return number(-result);
   }
   while (args != NULL) {
     int temp = integer(car(args));
     #if defined(checkoverflow)
-    if (temp < 1) { if (32767 + temp < result) error(PSTR("'-' arithmetic overflow")); }
-    else { if (-32768 + temp > result) error(PSTR("'-' arithmetic overflow")); }
+    if (temp < 1) { if (INT_MAX + temp < result) error(PSTR("'-' arithmetic overflow")); }
+    else { if (INT_MIN + temp > result) error(PSTR("'-' arithmetic overflow")); }
     #endif
     result = result - temp;
     args = cdr(args);
@@ -1655,7 +1663,7 @@ object *fn_multiply (object *args, object *env) {
   while (args != NULL){
     #if defined(checkoverflow)
     signed long temp = (signed long) result * integer(car(args));
-    if ((temp > 32767) || (temp < -32768)) error(PSTR("'*' arithmetic overflow"));
+    if ((temp > INT_MAX) || (temp < INT_MIN)) error(PSTR("'*' arithmetic overflow"));
     result = temp;
     #else
     result = result * integer(car(args));
@@ -1673,7 +1681,7 @@ object *fn_divide (object *args, object *env) {
     int arg = integer(car(args));
     if (arg == 0) error(PSTR("Division by zero"));
     #if defined(checkoverflow)
-    if ((result == -32768) && (arg == -1)) error(PSTR("'/' arithmetic overflow"));
+    if ((result == INT_MIN) && (arg == -1)) error(PSTR("'/' arithmetic overflow"));
     #endif
     result = result / arg;
     args = cdr(args);
@@ -1695,7 +1703,7 @@ object *fn_oneplus (object *args, object *env) {
   (void) env;
   int result = integer(first(args));
   #if defined(checkoverflow)
-  if (result == 32767) error(PSTR("'1+' arithmetic overflow"));
+  if (result == INT_MAX) error(PSTR("'1+' arithmetic overflow"));
   #endif
   return number(result + 1);
 }
@@ -1704,7 +1712,7 @@ object *fn_oneminus (object *args, object *env) {
   (void) env;
   int result = integer(first(args));
   #if defined(checkoverflow)
-  if (result == -32768) error(PSTR("'1-' arithmetic overflow"));
+  if (result == INT_MIN) error(PSTR("'1-' arithmetic overflow"));
   #endif
   return number(result - 1);
 }
@@ -1713,7 +1721,7 @@ object *fn_abs (object *args, object *env) {
   (void) env;
   int result = integer(first(args));
   #if defined(checkoverflow)
-  if (result == -32768) error(PSTR("'abs' arithmetic overflow"));
+  if (result == INT_MIN) error(PSTR("'abs' arithmetic overflow"));
   #endif
   return number(abs(result));
 }
@@ -1995,11 +2003,11 @@ object *fn_concatenate (object *args, object *env) {
     if (obj->type != STRING) error2(obj, PSTR("not a string"));
     obj = cdr(obj);
     while (obj != NULL) {
-      int pair = obj->integer;
-       while (pair != 0) {
-         char ch = pair>>8 & 0xFF;
+      int quad = obj->integer;
+      while (quad != 0) {
+         char ch = quad>>((sizeof(int)-1)*8) & 0xFF;
          buildstring(ch, &chars, &head);
-         pair = pair<<8;
+         quad = quad<<8;
       }
       obj = car(obj);
     }
@@ -2084,7 +2092,7 @@ object *fn_prin1tostring (object *args, object *env) {
 
 object *fn_logand (object *args, object *env) {
   (void) env;
-  unsigned int result = 0xFFFF;
+  int result = -1;
   while (args != NULL) {
     result = result & integer(first(args));
     args = cdr(args);
@@ -2094,7 +2102,7 @@ object *fn_logand (object *args, object *env) {
 
 object *fn_logior (object *args, object *env) {
   (void) env;
-  unsigned int result = 0;
+  int result = 0;
   while (args != NULL) {
     result = result | integer(first(args));
     args = cdr(args);
@@ -2104,7 +2112,7 @@ object *fn_logior (object *args, object *env) {
 
 object *fn_logxor (object *args, object *env) {
   (void) env;
-  unsigned int result = 0;
+  int result = 0;
   while (args != NULL) {
     result = result ^ integer(first(args));
     args = cdr(args);
@@ -2261,13 +2269,14 @@ object *fn_restarti2c (object *args, object *env) {
 }
 
 object *fn_gc (object *obj, object *env) {
-  unsigned long start = micros();
   int initial = Freespace;
+  unsigned long start = micros();
   gc(obj, env);
+  unsigned long elapsed = micros() - start;
   pfstring(PSTR("Space: "), pserial);
   pint(Freespace - initial, pserial);
   pfstring(PSTR(" bytes, Time: "), pserial);
-  pint(micros() - start, pserial);
+  pint(elapsed, pserial);
   pfstring(PSTR(" uS\r"), pserial);
   return nil;
 }
@@ -2283,8 +2292,9 @@ object *fn_saveimage (object *args, object *env) {
 }
 
 object *fn_loadimage (object *args, object *env) {
-  (void) args, (void) env;
-  return number(loadimage());
+  (void) env;
+  if (args != NULL) args = first(args);
+  return number(loadimage(args));
 }
 
 object *fn_cls(object *args, object *env) {
@@ -2763,7 +2773,7 @@ const tbl_entry_t lookup_table[] PROGMEM = {
   { string136, fn_gc, 0, 0 },
   { string137, fn_room, 0, 0 },
   { string138, fn_saveimage, 0, 1 },
-  { string139, fn_loadimage, 0, 0 },
+  { string139, fn_loadimage, 0, 1 },
   { string140, fn_cls, 0, 0 },
   { string141, fn_pinmode, 2, 2 },
   { string142, fn_digitalread, 1, 1 },
@@ -3020,12 +3030,11 @@ void printstring (object *form, pfun_t pfun) {
   form = cdr(form);
   while (form != NULL) {
     int chars = form->integer;
-    char ch = chars>>8 & 0xFF;
-    if (PrintReadably && (ch == '"' || ch == '\\')) pfun('\\');
-    pfun(ch);
-    ch = chars & 0xFF;
-    if (PrintReadably && (ch == '"' || ch == '\\')) pfun('\\');
-    if (ch) pfun(ch);
+    for (int i=(sizeof(int)-1)*8; i>=0; i=i-8) {
+      char ch = chars>>i & 0xFF;
+      if (PrintReadably && (ch == '"' || ch == '\\')) pfun('\\');
+      if (ch) pfun(ch);
+    }
     form = car(form);
   }
   if (PrintReadably) pfun('"');
@@ -3042,8 +3051,13 @@ void pfstring (PGM_P s, pfun_t pfun) {
 
 void pint (int i, pfun_t pfun) {
   int lead = 0;
+  #if INT_MAX == 32767
+  int p = 10000;
+  #else
+  int p = 1000000000;
+  #endif
   if (i<0) pfun('-');
-  for (int d=10000; d>0; d=d/10) {
+  for (int d=p; d>0; d=d/10) {
     int j = i/d;
     if (j!=0 || lead || d==1) { pfun(abs(j)+'0'); lead=1;}
     i = i - j*d;
@@ -3165,7 +3179,8 @@ object *nextitem (gfun_t gfun) {
   if (ch == '(') LastChar = '(';
 
   if (isnumber) {
-    if (base == 10 && result > ((unsigned int)32767+(1-sign)/2)) error(PSTR("Number out of range"));
+    if (base == 10 && result > ((unsigned int)INT_MAX+(1-sign)/2)) 
+      error(PSTR("Number out of range"));
     return number(result*sign);
   } else if (base == 0) {
     if (index == 1) return character(buffer[0]);
@@ -3211,6 +3226,7 @@ object *readrest (gfun_t gfun) {
 
 object *read (gfun_t gfun) {
   object *item = nextitem(gfun);
+  if (item == (object *)KET) error(PSTR("Incomplete list"));
   if (item == (object *)BRA) return readrest(gfun);
   if (item == (object *)DOT) return read(gfun);
   if (item == (object *)QUO) return cons(symbol(QUOTE), cons(read(gfun), NULL)); 
@@ -3229,8 +3245,7 @@ void setup() {
   while (!Serial);  // wait for Serial to initialize
   initworkspace();
   initenv();
-  _end = 0xA5;      // Canary to check stack
-  pfstring(PSTR("uLisp 1.9 "), pserial); pln(pserial);
+  pfstring(PSTR("uLisp 1.9b "), pserial); pln(pserial);
 }
 
 // Read/Evaluate/Print loop
@@ -3267,5 +3282,8 @@ void loop () {
     autorunimage();
     #endif
   }
+  // Come here after error
+  _end = 0xA5;      // Canary to check stack
+  for (int i=0; i<TRACEMAX; i++) TraceDepth[i] = 0;
   repl(NULL);
 }
