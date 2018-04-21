@@ -1,5 +1,5 @@
-/* uLisp Version 2.0 - www.ulisp.com
-   David Johnson-Davies - www.technoblogy.com - 10th February 2018
+/* uLisp Version 2.1 - www.ulisp.com
+   David Johnson-Davies - www.technoblogy.com - 21st April 2018
 
    Licensed under the MIT license: https://opensource.org/licenses/MIT
 */
@@ -15,6 +15,7 @@
 
 // Includes
 
+#include <avr/sleep.h>
 #include <setjmp.h>
 #include <SPI.h>
 #include <limits.h>
@@ -40,11 +41,11 @@
 #define push(x, y)         ((y) = cons((x),(y)))
 #define pop(y)             ((y) = cdr(y))
 
-#define numberp(x)         ((x)->type == NUMBER)
-#define symbolp(x)         ((x)->type == SYMBOL)
-#define stringp(x)         ((x)->type == STRING)
-#define characterp(x)      ((x)->type == CHARACTER)
-#define streamp(x)         ((x)->type == STREAM)
+#define numberp(x)         ((x) != NULL && (x)->type == NUMBER)
+#define symbolp(x)         ((x) != NULL && (x)->type == SYMBOL)
+#define stringp(x)         ((x) != NULL && (x)->type == STRING)
+#define characterp(x)      ((x) != NULL && (x)->type == CHARACTER)
+#define streamp(x)         ((x) != NULL && (x)->type == STREAM)
 
 #define mark(x)            (car(x) = (object *)(((uintptr_t)(car(x))) | MARKBIT))
 #define unmark(x)          (car(x) = (object *)(((uintptr_t)(car(x))) & ~MARKBIT))
@@ -73,7 +74,8 @@ MINUSP, ZEROP, ODDP, EVENP, CHAR, CHARCODE, CODECHAR, CHARACTERP, STRINGP, STRIN
 STRINGGREATER, SORT, STRINGFN, CONCATENATE, SUBSEQ, READFROMSTRING, PRINCTOSTRING, PRIN1TOSTRING, LOGAND,
 LOGIOR, LOGXOR, LOGNOT, ASH, LOGBITP, EVAL, GLOBALS, LOCALS, MAKUNBOUND, BREAK, READ, PRIN1, PRINT, PRINC,
 TERPRI, READBYTE, READLINE, WRITEBYTE, WRITESTRING, WRITELINE, RESTARTI2C, GC, ROOM, SAVEIMAGE, LOADIMAGE,
-CLS, PINMODE, DIGITALREAD, DIGITALWRITE, ANALOGREAD, ANALOGWRITE, DELAY, MILLIS, NOTE, EDIT, PPRINT, ENDFUNCTIONS };
+CLS, PINMODE, DIGITALREAD, DIGITALWRITE, ANALOGREAD, ANALOGWRITE, DELAY, MILLIS, SLEEP, NOTE, EDIT,
+PPRINT, ENDFUNCTIONS };
 
 // Typedefs
 
@@ -112,7 +114,7 @@ typedef void (*pfun_t)(char);
 #define BUFFERSIZE 18
 
 #if defined(__AVR_ATmega328P__)
-#define WORKSPACESIZE 314-SDSIZE        /* Cells (4*bytes) */
+#define WORKSPACESIZE 315-SDSIZE        /* Cells (4*bytes) */
 #define IMAGEDATASIZE 254               /* Cells */
 #define SYMBOLTABLESIZE BUFFERSIZE      /* Bytes - no long symbols */
 
@@ -163,7 +165,7 @@ object *read ();
 void repl(object *env);
 void printobject (object *form, pfun_t pfun);
 char *lookupbuiltin (symbol_t name);
-int lookupfn (symbol_t name);
+intptr_t lookupfn (symbol_t name);
 int builtin (char* n);
 void Display (char c);
 
@@ -225,6 +227,14 @@ object *symbol (symbol_t name) {
   return ptr;
 }
 
+object *newsymbol (symbol_t name) {
+  for (int i=WORKSPACESIZE-1; i>=0; i--) {
+    object *obj = &Workspace[i];
+    if (obj->type == SYMBOL && obj->name == name) return obj;
+  }
+  return symbol(name);
+}
+
 object *stream (unsigned char streamtype, unsigned char address) {
   object *ptr = myalloc();
   ptr->type = STREAM;
@@ -272,7 +282,7 @@ void gc (object *form, object *env) {
   #if defined(printgcs)
   int start = Freespace;
   #endif
-  markobject(tee); 
+  markobject(tee);
   markobject(GlobalEnv);
   markobject(GCStack);
   markobject(form);
@@ -290,8 +300,8 @@ void movepointer (object *from, object *to) {
     object *obj = &Workspace[i];
     unsigned int type = (obj->type) & ~MARKBIT;
     if (marked(obj) && (type >= STRING || type==ZERO)) {
-      if (car(obj) == (object *)((unsigned int)from | MARKBIT)) 
-        car(obj) = (object *)((unsigned int)to | MARKBIT);
+      if (car(obj) == (object *)((uintptr_t)from | MARKBIT)) 
+        car(obj) = (object *)((uintptr_t)to | MARKBIT);
       if (cdr(obj) == from) cdr(obj) = to;
     }
   }
@@ -302,7 +312,7 @@ void movepointer (object *from, object *to) {
       obj = cdr(obj);
       while (obj != NULL) {
         if (cdr(obj) == to) cdr(obj) = from;
-        obj = (object *)((unsigned int)(car(obj)) & ~MARKBIT);
+        obj = (object *)((uintptr_t)(car(obj)) & ~MARKBIT);
       }
     }
   }
@@ -428,7 +438,6 @@ void error2 (object *symbol, PGM_P string) {
 // Tracing
 
 boolean tracing (symbol_t name) {
-  if (name == 0) return 0;
   int i = 0;
   while (i < TRACEMAX) {
     if (TraceFn[i] == name) return i+1;
@@ -539,12 +548,13 @@ int issymbol (object *obj, symbol_t n) {
 }
 
 int eq (object *arg1, object *arg2) {
-  int same_object = (arg1 == arg2);
-  int same_value = (arg1->cdr == arg2->cdr);
-  int same_symbol = (symbolp(arg1) && symbolp(arg2) && same_value);
-  int same_number = (numberp(arg1) && numberp(arg2) && same_value);
-  int same_character = (characterp(arg1) && characterp(arg2) && same_value);
-  return same_object || same_symbol || same_number || same_character;
+  if (arg1 == arg2) return true;  // Same object
+  if ((arg1 == nil) || (arg2 == nil)) return false;  // Not both values
+  if (arg1->cdr != arg2->cdr) return false;  // Different values
+  if (symbolp(arg1) && symbolp(arg2)) return true;  // Same symbol
+  if (numberp(arg1) && numberp(arg2)) return true;  // Same number
+  if (characterp(arg1) && characterp(arg2)) return true;  // Same character
+  return false;
 }
 
 int listlength (object *list) {
@@ -612,10 +622,10 @@ object *readstring (char delim, gfun_t gfun) {
   object *obj = myalloc();
   obj->type = STRING;
   int ch = gfun();
-  if (ch == EOF) return nil;
+  if (ch == -1) return nil;
   object *head = NULL;
   int chars = 0;
-  while ((ch != delim) && (ch != EOF)) {
+  while ((ch != delim) && (ch != -1)) {
     if (ch == '\\') ch = gfun();
     buildstring(ch, &chars, &head);
     ch = gfun();
@@ -691,7 +701,8 @@ void dropframe (int tc, object **env) {
 // Handling closures
   
 object *closure (object *fname, object *state, object *function, object *args, object **env) {
-  int trace = tracing(fname->name);
+  int trace = 0;
+  if (fname != NULL) trace = tracing(fname->name);
   if (trace) {
     indent(TraceDepth[trace-1]<<1, pserial);
     pint(TraceDepth[trace-1]++, pserial);
@@ -1074,7 +1085,9 @@ object *sp_defun (object *args, object *env) {
 object *sp_defvar (object *args, object *env) {
   object *var = first(args);
   if (var->type != SYMBOL) error2(var, PSTR("is not a symbol"));
-  object *val = eval(second(args), env);
+  object *val = NULL;
+  args = cdr(args);
+  if (args != NULL) val = eval(first(args), env);
   object *pair = value(var->name,GlobalEnv);
   if (pair != NULL) { cdr(pair) = val; return var; }
   push(cons(var, val), GlobalEnv);
@@ -1452,17 +1465,20 @@ object *fn_consp (object *args, object *env) {
 
 object *fn_numberp (object *args, object *env) {
   (void) env;
-  return numberp(first(args)) ? tee : nil;
+  object *arg = first(args);
+  return numberp(arg) ? tee : nil;
 }
 
 object *fn_symbolp (object *args, object *env) {
   (void) env;
-  return symbolp(first(args)) ? tee : nil;
+  object *arg = first(args);
+  return symbolp(arg) ? tee : nil;
 }
 
 object *fn_streamp (object *args, object *env) {
   (void) env;
-  return streamp(first(args)) ? tee : nil;
+  object *arg = first(args);
+  return streamp(arg) ? tee : nil;
 }
 
 object *fn_eq (object *args, object *env) {
@@ -1648,8 +1664,6 @@ object *fn_mapc (object *args, object *env) {
   if (list2 != NULL) {
     list2 = car(list2);
     if (!listp(list2)) error(PSTR("'mapc' third argument is not a list"));
-  }
-  if (list2 != NULL) {
     while (list1 != NULL && list2 != NULL) {
       apply(function, cons(car(list1),cons(car(list2),NULL)), &env);
       list1 = cdr(list1);
@@ -2284,9 +2298,9 @@ object *fn_prin1 (object *args, object *env) {
 
 object *fn_print (object *args, object *env) {
   (void) env;
+  pln(pserial);
   object *obj = first(args);
   pfun_t pfun = pstreamfun(cdr(args));
-  pln(pfun);
   printobject(obj, pfun);
   (pfun)(' ');
   return obj;
@@ -2314,7 +2328,7 @@ object *fn_readbyte (object *args, object *env) {
   (void) env;
   gfun_t gfun = gstreamfun(args);
   int c = gfun();
-  return (c == EOF) ? nil : number(c);
+  return (c == -1) ? nil : number(c);
 }
 
 object *fn_readline (object *args, object *env) {
@@ -2399,7 +2413,7 @@ object *fn_loadimage (object *args, object *env) {
   return number(loadimage(args));
 }
 
-object *fn_cls(object *args, object *env) {
+object *fn_cls (object *args, object *env) {
   (void) args, (void) env;
   pserial(12);
   return nil;
@@ -2419,7 +2433,7 @@ object *fn_pinmode (object *args, object *env) {
 object *fn_digitalread (object *args, object *env) {
   (void) env;
   int pin = integer(first(args));
-  if(digitalRead(pin) != 0) return tee; else return nil;
+  if (digitalRead(pin) != 0) return tee; else return nil;
 }
 
 object *fn_digitalwrite (object *args, object *env) {
@@ -2458,12 +2472,50 @@ object *fn_millis (object *args, object *env) {
   return number(millis());
 }
 
+// Interrupt vector for sleep watchdog
+ISR(WDT_vect) {
+  WDTCSR |= 1<<WDIE;
+}
+
+object *fn_sleep (object *args, object *env) {
+  (void) env;
+  object *arg1 = first(args);
+  int secs = integer(arg1);
+  // Set up Watchdog timer for 1 Hz interrupt
+  WDTCSR = 1<<WDCE | 1<<WDE;
+  WDTCSR = 1<<WDIE | 6<<WDP0;     // 1 sec interrupt
+  delay(100);  // Give serial time to settle
+  // Disable ADC and timer 0
+  ADCSRA = ADCSRA & ~(1<<ADEN);
+#if defined(__AVR_ATmega328P__)
+  PRR = PRR | 1<<PRTIM0;
+#elif defined(__AVR_ATmega2560__) || defined(__AVR_ATmega1284P__)
+  PRR0 = PRR0 | 1<<PRTIM0;
+#endif
+  while (secs > 0) {
+    sleep_enable();
+    sleep_cpu();
+    secs--;
+  }
+  WDTCSR = 1<<WDCE | 1<<WDE;     // Disable watchdog
+  WDTCSR = 0;
+  // Enable ADC and timer 0
+  ADCSRA = ADCSRA | 1<<ADEN;
+#if defined(__AVR_ATmega328P__)
+  PRR = PRR & ~(1<<PRTIM0);
+#elif defined(__AVR_ATmega2560__) || defined(__AVR_ATmega1284P__)
+  PRR0 = PRR0 & ~(1<<PRTIM0);
+#endif
+  return arg1;
+}
+
 object *fn_note (object *args, object *env) {
   (void) env;
   static int pin = 255;
   if (args != NULL) {
     pin = integer(first(args));
-    int note = integer(second(args));
+    int note = 0;
+    if (cddr(args) != NULL) note = integer(second(args));
     int octave = 0;
     if (cddr(args) != NULL) octave = integer(third(args));
     playnote(pin, note, octave);
@@ -2547,8 +2599,9 @@ void superprint (object *form, int lm, pfun_t pfun) {
   else supersub(form, lm + PPINDENT, 1, pfun);
 }
 
-const int ppspecials = 12;
-const char ppspecial[ppspecials] PROGMEM = { IF, SETQ, TEE, LET, LETSTAR, LAMBDA, WHEN, UNLESS, WITHI2C, WITHSERIAL, WITHSPI, WITHSDCARD };
+const int ppspecials = 14;
+const char ppspecial[ppspecials] PROGMEM = 
+  { DOTIMES, DOLIST, IF, SETQ, TEE, LET, LETSTAR, LAMBDA, WHEN, UNLESS, WITHI2C, WITHSERIAL, WITHSPI, WITHSDCARD };
 
 void supersub (object *form, int lm, int super, pfun_t pfun) {
   int special = 0, separate = 1;
@@ -2734,9 +2787,10 @@ const char string145[] PROGMEM = "analogread";
 const char string146[] PROGMEM = "analogwrite";
 const char string147[] PROGMEM = "delay";
 const char string148[] PROGMEM = "millis";
-const char string149[] PROGMEM = "note";
-const char string150[] PROGMEM = "edit";
-const char string151[] PROGMEM = "pprint";
+const char string149[] PROGMEM = "sleep";
+const char string150[] PROGMEM = "note";
+const char string151[] PROGMEM = "edit";
+const char string152[] PROGMEM = "pprint";
 
 const tbl_entry_t lookup_table[] PROGMEM = {
   { string0, NULL, NIL, NIL },
@@ -2888,9 +2942,10 @@ const tbl_entry_t lookup_table[] PROGMEM = {
   { string146, fn_analogwrite, 2, 2 },
   { string147, fn_delay, 1, 1 },
   { string148, fn_millis, 0, 0 },
-  { string149, fn_note, 0, 3 },
-  { string150, fn_edit, 1, 1 },
-  { string151, fn_pprint, 1, 2 },
+  { string149, fn_sleep, 1, 1 },
+  { string150, fn_note, 0, 3 },
+  { string151, fn_edit, 1, 1 },
+  { string152, fn_pprint, 1, 2 },
 };
 
 // Table lookup functions
@@ -2898,7 +2953,7 @@ const tbl_entry_t lookup_table[] PROGMEM = {
 int builtin (char* n) {
   int entry = 0;
   while (entry < ENDFUNCTIONS) {
-    if(strcmp_P(n, (char*)pgm_read_word(&lookup_table[entry].string)) == 0)
+    if (strcmp_P(n, (char*)pgm_read_word(&lookup_table[entry].string)) == 0)
       return entry;
     entry++;
   }
@@ -2919,7 +2974,7 @@ int longsymbol (char *buffer) {
   return i + 64000; // First number unused by radix40
 }
 
-int lookupfn (symbol_t name) {
+intptr_t lookupfn (symbol_t name) {
   return pgm_read_word(&lookup_table[name].fptr);
 }
 
@@ -3005,8 +3060,9 @@ object *eval (object *form, object *env) {
       push(newenv, GCStack);
       while (assigns != NULL) {
         object *assign = car(assigns);
-        if (consp(assign)) push(cons(first(assign),eval(second(assign),env)), newenv);
-        else push(cons(assign,nil), newenv);
+        if (!consp(assign)) push(cons(assign,nil), newenv);
+        else if (cdr(assign) == NULL) push(cons(first(assign),nil), newenv);
+        else push(cons(first(assign),eval(second(assign),env)), newenv);
         car(GCStack) = newenv;
         if (name == LETSTAR) env = newenv;
         assigns = cdr(assigns);
@@ -3149,7 +3205,7 @@ void printstring (object *form, pfun_t pfun) {
 }
 
 void pfstring (PGM_P s, pfun_t pfun) {
-  int p = (int)s;
+  intptr_t p = (intptr_t)s;
   while (1) {
     char c = pgm_read_byte(p++);
     if (c == 0) return;
@@ -3180,7 +3236,7 @@ void pfl (pfun_t pfun) {
   if (LastPrint != '\n') pfun('\n');
 }
 
-void printobject(object *form, pfun_t pfun){
+void printobject (object *form, pfun_t pfun){
   if (form == NULL) pfstring(PSTR("nil"), pfun);
   else if (listp(form) && issymbol(car(form), CLOSURE)) pfstring(PSTR("<closure>"), pfun);
   else if (listp(form)) {
@@ -3241,7 +3297,8 @@ object *nextitem (gfun_t gfun) {
     ch = '(';
   }
   if (ch == '\n') ch = gfun();
-  if (ch == EOF) return nil;
+  if (ch == EOF) exit(0);
+  if (ch == -1) return nil;
   if (ch == ')') return (object *)KET;
   if (ch == '(') return (object *)BRA;
   if (ch == '\'') return (object *)QUO;
@@ -3250,7 +3307,7 @@ object *nextitem (gfun_t gfun) {
   // Parse string
   if (ch == '"') return readstring('"', gfun);
   
-  // Parse variable, character, or number
+  // Parse symbol, character, or number
   int index = 0, base = 10, sign = 1;
   char *buffer = SymbolTop;
   int bufmax = SYMBOLTABLESIZE-(buffer-SymbolTable)-1; // Max index
@@ -3272,7 +3329,7 @@ object *nextitem (gfun_t gfun) {
     ch = gfun();
   }
   int isnumber = (digitvalue(ch)<base);
-  buffer[2] = '\0'; // In case variable is one letter
+  buffer[2] = '\0'; // In case symbol is one letter
 
   while(!isspace(ch) && ch != ')' && ch != '(' && index < bufmax) {
     buffer[index++] = ch;
@@ -3283,8 +3340,7 @@ object *nextitem (gfun_t gfun) {
   }
 
   buffer[index] = '\0';
-  if (ch == ')') LastChar = ')';
-  if (ch == '(') LastChar = '(';
+  if (ch == ')' || ch == '(') LastChar = ch;
 
   if (isnumber) {
     if (base == 10 && result > ((unsigned int)INT_MAX+(1-sign)/2)) 
@@ -3302,9 +3358,9 @@ object *nextitem (gfun_t gfun) {
   
   int x = builtin(buffer);
   if (x == NIL) return nil;
-  if (x < ENDFUNCTIONS) return symbol(x);
-  else if (index < 4 && valid40(buffer)) return symbol(pack40(buffer));
-  else return symbol(longsymbol(buffer));
+  if (x < ENDFUNCTIONS) return newsymbol(x);
+  else if (index < 4 && valid40(buffer)) return newsymbol(pack40(buffer));
+  else return newsymbol(longsymbol(buffer));
 }
 
 object *readrest (gfun_t gfun) {
@@ -3343,17 +3399,18 @@ object *read (gfun_t gfun) {
 
 // Setup
 
-void initenv() {
+void initenv () {
   GlobalEnv = NULL;
   tee = symbol(TEE);
 }
 
-void setup() {
+void setup () {
   Serial.begin(9600);
   while (!Serial);  // wait for Serial to initialize
   initworkspace();
   initenv();
-  pfstring(PSTR("uLisp 2.0 "), pserial); pln(pserial);
+  set_sleep_mode(SLEEP_MODE_PWR_DOWN);
+  pfstring(PSTR("uLisp 2.1 "), pserial); pln(pserial);
 }
 
 // Read/Evaluate/Print loop
@@ -3385,13 +3442,16 @@ void repl (object *env) {
 }
 
 void loop () {
+  End = 0xA5;      // Canary to check stack
   if (!setjmp(exception)) {
     #if defined(resetautorun)
-    autorunimage();
+    volatile int autorun = 12; // Fudge to keep code size the same
+    #else
+    volatile int autorun = 13;
     #endif
+    if (autorun == 12) autorunimage();
   }
   // Come here after error
-  End = 0xA5;      // Canary to check stack
   for (int i=0; i<TRACEMAX; i++) TraceDepth[i] = 0;
   #if defined(sdcardsupport)
   SDpfile.close(); SDgfile.close();
