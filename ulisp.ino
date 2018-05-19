@@ -1,5 +1,5 @@
-/* uLisp Version 2.1 - www.ulisp.com
-   David Johnson-Davies - www.technoblogy.com - 21st April 2018
+/* uLisp AVR Version 2.2 - www.ulisp.com
+   David Johnson-Davies - www.technoblogy.com - 19th May 2018
 
    Licensed under the MIT license: https://opensource.org/licenses/MIT
 */
@@ -688,19 +688,9 @@ object *findtwin (object *var, object *env) {
   return NULL;
 }
 
-void dropframe (int tc, object **env) {
-  if (tc) {
-    while (*env != NULL && car(*env) != NULL) {
-      pop(*env);
-    }
-  } else {
-    push(nil, *env);
-  }
-}
-
 // Handling closures
   
-object *closure (object *fname, object *state, object *function, object *args, object **env) {
+object *closure (int tc, object *fname, object *state, object *function, object *args, object **env) {
   int trace = 0;
   if (fname != NULL) trace = tracing(fname->name);
   if (trace) {
@@ -729,7 +719,9 @@ object *closure (object *fname, object *state, object *function, object *args, o
       value = first(args);
       args = cdr(args);
     }
-    push(cons(var,value), *env);
+    object *pair = findtwin(var, *env);
+    if (tc && (pair != NULL)) cdr(pair) = value;
+    else push(cons(var,value), *env);
     params = cdr(params);
     if (trace) { pserial(' '); printobject(value, pserial); }
   }
@@ -751,12 +743,12 @@ object *apply (object *function, object *args, object **env) {
   }
   if (listp(function) && issymbol(car(function), LAMBDA)) {
     function = cdr(function);
-    object *result = closure(NULL, NULL, function, args, env);
+    object *result = closure(0, NULL, NULL, function, args, env);
     return eval(result, *env);
   }
   if (listp(function) && issymbol(car(function), CLOSURE)) {
     function = cdr(function);
-    object *result = closure(NULL, car(function), cdr(function), args, env);
+    object *result = closure(0, NULL, car(function), cdr(function), args, env);
     return eval(result, *env);
   }
   error2(function, PSTR("is an illegal function"));
@@ -1064,6 +1056,45 @@ void nonote (int pin) {
   TCCR2B = 0<<WGM22 | 0<<CS20;
 }
 
+// Sleep
+
+// Interrupt vector for sleep watchdog
+ISR(WDT_vect) {
+  WDTCSR |= 1<<WDIE;
+}
+
+void initsleep () {
+  set_sleep_mode(SLEEP_MODE_PWR_DOWN);
+}
+
+void sleep (int secs) {
+  // Set up Watchdog timer for 1 Hz interrupt
+  WDTCSR = 1<<WDCE | 1<<WDE;
+  WDTCSR = 1<<WDIE | 6<<WDP0;     // 1 sec interrupt
+  delay(100);  // Give serial time to settle
+  // Disable ADC and timer 0
+  ADCSRA = ADCSRA & ~(1<<ADEN);
+#if defined(__AVR_ATmega328P__)
+  PRR = PRR | 1<<PRTIM0;
+#elif defined(__AVR_ATmega2560__) || defined(__AVR_ATmega1284P__)
+  PRR0 = PRR0 | 1<<PRTIM0;
+#endif
+  while (secs > 0) {
+    sleep_enable();
+    sleep_cpu();
+    secs--;
+  }
+  WDTCSR = 1<<WDCE | 1<<WDE;     // Disable watchdog
+  WDTCSR = 0;
+  // Enable ADC and timer 0
+  ADCSRA = ADCSRA | 1<<ADEN;
+#if defined(__AVR_ATmega328P__)
+  PRR = PRR & ~(1<<PRTIM0);
+#elif defined(__AVR_ATmega2560__) || defined(__AVR_ATmega1284P__)
+  PRR0 = PRR0 & ~(1<<PRTIM0);
+#endif
+}
+
 // Special forms
 
 object *sp_quote (object *args, object *env) {
@@ -1345,7 +1376,7 @@ object *sp_withsdcard (object *args, object *env) {
   int mode = 0;
   if (params != NULL && first(params) != NULL) mode = integer(first(params));
   int oflag = O_READ;
-  if (mode == 1) oflag = O_RDWR | O_CREAT; else if (mode == 2) oflag = O_RDWR | O_CREAT | O_TRUNC;
+  if (mode == 1) oflag = O_RDWR | O_CREAT | O_APPEND; else if (mode == 2) oflag = O_RDWR | O_CREAT | O_TRUNC;
   if (mode >= 1) {
     SDpfile = SD.open(MakeFilename(filename), oflag);
     if (!SDpfile) error(PSTR("Problem writing to SD card"));
@@ -1843,7 +1874,8 @@ object *fn_max (object *args, object *env) {
   int result = integer(first(args));
   args = cdr(args);
   while (args != NULL) {
-    result = max(result,integer(car(args)));
+    int next = integer(car(args));
+    if (next > result) result = next;
     args = cdr(args);
   }
   return number(result);
@@ -1854,7 +1886,8 @@ object *fn_min (object *args, object *env) {
   int result = integer(first(args));
   args = cdr(args);
   while (args != NULL) {
-    result = min(result,integer(car(args)));
+    int next = integer(car(args));
+    if (next < result) result = next;
     args = cdr(args);
   }
   return number(result);
@@ -2151,7 +2184,7 @@ int gstr () {
     return temp;
   }
   char c = nthchar(GlobalString, GlobalStringIndex++);
-  return (c != 0) ? c : '\n';
+  return (c != 0) ? c : '\n'; // -1?
 }
 
 object *fn_readfromstring (object *args, object *env) {   
@@ -2298,9 +2331,9 @@ object *fn_prin1 (object *args, object *env) {
 
 object *fn_print (object *args, object *env) {
   (void) env;
-  pln(pserial);
   object *obj = first(args);
   pfun_t pfun = pstreamfun(cdr(args));
+  pln(pfun);
   printobject(obj, pfun);
   (pfun)(' ');
   return obj;
@@ -2363,7 +2396,7 @@ object *fn_writeline (object *args, object *env) {
   char temp = PrintReadably;
   PrintReadably = 0;
   printstring(obj, pfun);
-  (pfun)('\n');
+  pln(pfun);
   PrintReadably = temp;
   return nil;
 }
@@ -2393,7 +2426,7 @@ object *fn_gc (object *obj, object *env) {
   pint(Freespace - initial, pserial);
   pfstring(PSTR(" bytes, Time: "), pserial);
   pint(elapsed, pserial);
-  pfstring(PSTR(" uS\r"), pserial);
+  pfstring(PSTR(" us\r"), pserial);
   return nil;
 }
 
@@ -2440,7 +2473,8 @@ object *fn_digitalwrite (object *args, object *env) {
   (void) env;
   int pin = integer(first(args));
   object *mode = second(args);
-  digitalWrite(pin, (mode != nil));
+  if (numberp(mode)) digitalWrite(pin, mode->integer);
+  else digitalWrite(pin, (mode != nil));
   return mode;
 }
 
@@ -2472,40 +2506,10 @@ object *fn_millis (object *args, object *env) {
   return number(millis());
 }
 
-// Interrupt vector for sleep watchdog
-ISR(WDT_vect) {
-  WDTCSR |= 1<<WDIE;
-}
-
 object *fn_sleep (object *args, object *env) {
   (void) env;
   object *arg1 = first(args);
-  int secs = integer(arg1);
-  // Set up Watchdog timer for 1 Hz interrupt
-  WDTCSR = 1<<WDCE | 1<<WDE;
-  WDTCSR = 1<<WDIE | 6<<WDP0;     // 1 sec interrupt
-  delay(100);  // Give serial time to settle
-  // Disable ADC and timer 0
-  ADCSRA = ADCSRA & ~(1<<ADEN);
-#if defined(__AVR_ATmega328P__)
-  PRR = PRR | 1<<PRTIM0;
-#elif defined(__AVR_ATmega2560__) || defined(__AVR_ATmega1284P__)
-  PRR0 = PRR0 | 1<<PRTIM0;
-#endif
-  while (secs > 0) {
-    sleep_enable();
-    sleep_cpu();
-    secs--;
-  }
-  WDTCSR = 1<<WDCE | 1<<WDE;     // Disable watchdog
-  WDTCSR = 0;
-  // Enable ADC and timer 0
-  ADCSRA = ADCSRA | 1<<ADEN;
-#if defined(__AVR_ATmega328P__)
-  PRR = PRR & ~(1<<PRTIM0);
-#elif defined(__AVR_ATmega2560__) || defined(__AVR_ATmega1284P__)
-  PRR0 = PRR0 & ~(1<<PRTIM0);
-#endif
+  sleep(integer(arg1));
   return arg1;
 }
 
@@ -3020,8 +3024,8 @@ object *eval (object *form, object *env) {
   int TC=0;
   EVAL:
   // Enough space?
-  if (Freespace < 20) gc(form, env);
   if (End != 0xA5) error(PSTR("Stack overflow"));
+  if (Freespace < 20) gc(form, env);
   // Escape
   if (tstflag(ESCAPE)) { clrflag(ESCAPE); error(PSTR("Escape!"));}
   #if defined (serialmonitor)
@@ -3131,8 +3135,7 @@ object *eval (object *form, object *env) {
   }
       
   if (listp(function) && issymbol(car(function), LAMBDA)) {
-    dropframe(TCstart, &env);
-    form = closure(fname, NULL, cdr(function), args, &env);
+    form = closure(TCstart, fname, NULL, cdr(function), args, &env);
     pop(GCStack);
     int trace = tracing(fname->name);
     if (trace) {
@@ -3151,8 +3154,7 @@ object *eval (object *form, object *env) {
 
   if (listp(function) && issymbol(car(function), CLOSURE)) {
     function = cdr(function);
-    dropframe(TCstart, &env);
-    form = closure(fname, car(function), cdr(function), args, &env);
+    form = closure(TCstart, fname, car(function), cdr(function), args, &env);
     pop(GCStack);
     TC = 1;
     goto EVAL;
@@ -3406,11 +3408,10 @@ void initenv () {
 
 void setup () {
   Serial.begin(9600);
-  while (!Serial);  // wait for Serial to initialize
   initworkspace();
   initenv();
-  set_sleep_mode(SLEEP_MODE_PWR_DOWN);
-  pfstring(PSTR("uLisp 2.1 "), pserial); pln(pserial);
+  initsleep();
+  pfstring(PSTR("uLisp 2.2 "), pserial); pln(pserial);
 }
 
 // Read/Evaluate/Print loop
