@@ -1,5 +1,5 @@
-/* uLisp AVR Version 2.3 - www.ulisp.com
-   David Johnson-Davies - www.technoblogy.com - 2nd June 2018
+/* uLisp AVR Version 2.4 - www.ulisp.com
+   David Johnson-Davies - www.technoblogy.com - 9th October 2018
 
    Licensed under the MIT license: https://opensource.org/licenses/MIT
 */
@@ -70,14 +70,14 @@ DEFUN, DEFVAR, SETQ, LOOP, PUSH, POP, INCF, DECF, SETF, DOLIST, DOTIMES, TRACE, 
 WITHSERIAL, WITHI2C, WITHSPI, WITHSDCARD, TAIL_FORMS, PROGN, RETURN, IF, COND, WHEN, UNLESS, AND, OR,
 FUNCTIONS, NOT, NULLFN, CONS, ATOM, LISTP, CONSP, SYMBOLP, STREAMP, EQ, CAR, FIRST, CDR, REST, CAAR, CADR,
 SECOND, CDAR, CDDR, CAAAR, CAADR, CADAR, CADDR, THIRD, CDAAR, CDADR, CDDAR, CDDDR, LENGTH, LIST, REVERSE,
-NTH, ASSOC, MEMBER, APPLY, FUNCALL, APPEND, MAPC, MAPCAR, ADD, SUBTRACT, MULTIPLY, DIVIDE, MOD, ONEPLUS,
-ONEMINUS, ABS, RANDOM, MAXFN, MINFN, NOTEQ, NUMEQ, LESS, LESSEQ, GREATER, GREATEREQ, PLUSP, MINUSP, ZEROP,
-ODDP, EVENP, INTEGERP, NUMBERP, CHAR, CHARCODE, CODECHAR, CHARACTERP, STRINGP, STRINGEQ, STRINGLESS,
-STRINGGREATER, SORT, STRINGFN, CONCATENATE, SUBSEQ, READFROMSTRING, PRINCTOSTRING, PRIN1TOSTRING, LOGAND,
-LOGIOR, LOGXOR, LOGNOT, ASH, LOGBITP, EVAL, GLOBALS, LOCALS, MAKUNBOUND, BREAK, READ, PRIN1, PRINT, PRINC,
-TERPRI, READBYTE, READLINE, WRITEBYTE, WRITESTRING, WRITELINE, RESTARTI2C, GC, ROOM, SAVEIMAGE, LOADIMAGE,
-CLS, PINMODE, DIGITALREAD, DIGITALWRITE, ANALOGREAD, ANALOGWRITE, DELAY, MILLIS, SLEEP, NOTE, EDIT,
-PPRINT, PPRINTALL, ENDFUNCTIONS };
+NTH, ASSOC, MEMBER, APPLY, FUNCALL, APPEND, MAPC, MAPCAR, ADD, SUBTRACT, MULTIPLY, DIVIDE, TRUNCATE, MOD,
+ONEPLUS, ONEMINUS, ABS, RANDOM, MAXFN, MINFN, NOTEQ, NUMEQ, LESS, LESSEQ, GREATER, GREATEREQ, PLUSP,
+MINUSP, ZEROP, ODDP, EVENP, INTEGERP, NUMBERP, CHAR, CHARCODE, CODECHAR, CHARACTERP, STRINGP, STRINGEQ,
+STRINGLESS, STRINGGREATER, SORT, STRINGFN, CONCATENATE, SUBSEQ, READFROMSTRING, PRINCTOSTRING,
+PRIN1TOSTRING, LOGAND, LOGIOR, LOGXOR, LOGNOT, ASH, LOGBITP, EVAL, GLOBALS, LOCALS, MAKUNBOUND, BREAK,
+READ, PRIN1, PRINT, PRINC, TERPRI, READBYTE, READLINE, WRITEBYTE, WRITESTRING, WRITELINE, RESTARTI2C, GC,
+ROOM, SAVEIMAGE, LOADIMAGE, CLS, PINMODE, DIGITALREAD, DIGITALWRITE, ANALOGREAD, ANALOGWRITE, DELAY,
+MILLIS, SLEEP, NOTE, EDIT, PPRINT, PPRINTALL, ENDFUNCTIONS };
 
 // Typedefs
 
@@ -117,17 +117,17 @@ typedef void (*pfun_t)(char);
 
 #if defined(__AVR_ATmega328P__)
 #define WORKSPACESIZE 315-SDSIZE        /* Cells (4*bytes) */
-#define IMAGEDATASIZE 254               /* Cells */
+#define EEPROMSIZE 1024                 /* Bytes */
 #define SYMBOLTABLESIZE BUFFERSIZE      /* Bytes - no long symbols */
 
 #elif defined(__AVR_ATmega2560__)
 #define WORKSPACESIZE 1216-SDSIZE       /* Cells (4*bytes) */
-#define IMAGEDATASIZE 893               /* Cells */
+#define EEPROMSIZE 4096                 /* Bytes */
 #define SYMBOLTABLESIZE 512             /* Bytes */
 
 #elif defined(__AVR_ATmega1284P__)
 #define WORKSPACESIZE 2816-SDSIZE       /* Cells (4*bytes) */
-#define IMAGEDATASIZE 893               /* Cells */
+#define EEPROMSIZE 4096                 /* Bytes */
 #define SYMBOLTABLESIZE 512             /* Bytes */
 #endif
 
@@ -169,6 +169,8 @@ void printobject (object *form, pfun_t pfun);
 char *lookupbuiltin (symbol_t name);
 intptr_t lookupfn (symbol_t name);
 int builtin (char* n);
+void error (PGM_P string);
+void pfstring (PGM_P s, pfun_t pfun);
 
 // Set up workspace
 
@@ -368,15 +370,15 @@ typedef struct {
   unsigned int symboltop;
   char table[SYMBOLTABLESIZE];
   #endif
-  object data[IMAGEDATASIZE/4];
+  object data[];
 } struct_image;
 
 struct_image EEMEM image;
 
 int saveimage (object *arg) {
   unsigned int imagesize = compactimage(&arg);
-  // Save to EEPROM
-  if (imagesize > IMAGEDATASIZE) {
+  int bytesneeded = imagesize*4 + SYMBOLTABLESIZE + 10;
+  if (bytesneeded > EEPROMSIZE) {
     pfstring(PSTR("Error: Image size too large: "), pserial);
     pint(imagesize, pserial); pln(pserial);
     GCStack = NULL;
@@ -961,7 +963,7 @@ pfun_t pstreamfun (object *args) {
   int streamtype = SERIALSTREAM;
   int address = 0;
   pfun_t pfun = pserial;
-  if (args != NULL) {
+  if (args != NULL && first(args) != NULL) {
     int stream = istream(first(args));
     streamtype = stream>>8; address = stream & 0xFF;
   }
@@ -2019,7 +2021,9 @@ object *fn_numberp (object *args, object *env) {
 
 object *fn_char (object *args, object *env) {
   (void) env;
-  char c = nthchar(first(args), integer(second(args)));
+  object *arg = first(args);
+  if (!stringp(arg)) error2(arg, PSTR("is not a string"));
+  char c = nthchar(arg, integer(second(args)));
   if (c == 0) error(PSTR("'char' index out of range"));
   return character(c);
 }
@@ -2114,7 +2118,8 @@ object *fn_stringfn (object *args, object *env) {
   if (type == CHARACTER) {
     object *cell = myalloc();
     cell->car = NULL;
-    cell->integer = fromchar(arg)<<8;
+    uint8_t shift = (sizeof(int)-1)*8;
+    cell->integer = fromchar(arg)<<shift;
     obj->cdr = cell;
   } else if (type == SYMBOL) {
     char *s = name(arg);
@@ -2462,8 +2467,12 @@ object *fn_pinmode (object *args, object *env) {
   (void) env;
   int pin = integer(first(args));
   object *mode = second(args);
-  if (integerp(mode)) pinMode(pin, mode->integer);
-  else pinMode(pin, (mode != nil));
+  if ((integerp(mode) && mode->integer == 1) || mode != nil) pinMode(pin, OUTPUT);
+  else if (integerp(mode) && mode->integer == 2) pinMode(pin, INPUT_PULLUP);
+  #if defined(INPUT_PULLDOWN)
+  else if (integerp(mode) && mode->integer == 4) pinMode(pin, INPUT_PULLDOWN);
+  #endif
+  else pinMode(pin, INPUT);
   return nil;
 }
 
@@ -2597,7 +2606,7 @@ int subwidthlist (object *form, int w) {
 
 void superprint (object *form, int lm, pfun_t pfun) {
   if (atom(form)) {
-    if (form->name == NOTHING) pstring(name(form), pfun);
+    if (symbolp(form) && form->name == NOTHING) pstring(name(form), pfun);
     else printobject(form, pfun);
   }
   else if (quoted(form)) { pfun('\''); superprint(car(cdr(form)), lm + 1, pfun); }
@@ -2647,11 +2656,9 @@ object *fn_pprintall (object *args, object *env) {
     object *pair = first(globals);
     object *var = car(pair);
     object *val = cdr(pair);
-    object *head = car(val);
-    object *function = cdr(val);
-    if (head->name == LAMBDA) {
+    if (listp(val) && symbolp(car(val)) && car(val)->name == LAMBDA) {
       pln(pserial);
-      superprint(cons(symbol(DEFUN), cons(var, function)), 0, pserial);
+      superprint(cons(symbol(DEFUN), cons(var, cdr(val))), 0, pserial);
       pln(pserial);
     }
     globals = cdr(globals);
@@ -2744,80 +2751,81 @@ const char string77[] PROGMEM = "+";
 const char string78[] PROGMEM = "-";
 const char string79[] PROGMEM = "*";
 const char string80[] PROGMEM = "/";
-const char string81[] PROGMEM = "mod";
-const char string82[] PROGMEM = "1+";
-const char string83[] PROGMEM = "1-";
-const char string84[] PROGMEM = "abs";
-const char string85[] PROGMEM = "random";
-const char string86[] PROGMEM = "max";
-const char string87[] PROGMEM = "min";
-const char string88[] PROGMEM = "/=";
-const char string89[] PROGMEM = "=";
-const char string90[] PROGMEM = "<";
-const char string91[] PROGMEM = "<=";
-const char string92[] PROGMEM = ">";
-const char string93[] PROGMEM = ">=";
-const char string94[] PROGMEM = "plusp";
-const char string95[] PROGMEM = "minusp";
-const char string96[] PROGMEM = "zerop";
-const char string97[] PROGMEM = "oddp";
-const char string98[] PROGMEM = "evenp";
-const char string99[] PROGMEM = "integerp";
-const char string100[] PROGMEM = "numberp";
-const char string101[] PROGMEM = "char";
-const char string102[] PROGMEM = "char-code";
-const char string103[] PROGMEM = "code-char";
-const char string104[] PROGMEM = "characterp";
-const char string105[] PROGMEM = "stringp";
-const char string106[] PROGMEM = "string=";
-const char string107[] PROGMEM = "string<";
-const char string108[] PROGMEM = "string>";
-const char string109[] PROGMEM = "sort";
-const char string110[] PROGMEM = "string";
-const char string111[] PROGMEM = "concatenate";
-const char string112[] PROGMEM = "subseq";
-const char string113[] PROGMEM = "read-from-string";
-const char string114[] PROGMEM = "princ-to-string";
-const char string115[] PROGMEM = "prin1-to-string";
-const char string116[] PROGMEM = "logand";
-const char string117[] PROGMEM = "logior";
-const char string118[] PROGMEM = "logxor";
-const char string119[] PROGMEM = "lognot";
-const char string120[] PROGMEM = "ash";
-const char string121[] PROGMEM = "logbitp";
-const char string122[] PROGMEM = "eval";
-const char string123[] PROGMEM = "globals";
-const char string124[] PROGMEM = "locals";
-const char string125[] PROGMEM = "makunbound";
-const char string126[] PROGMEM = "break";
-const char string127[] PROGMEM = "read";
-const char string128[] PROGMEM = "prin1";
-const char string129[] PROGMEM = "print";
-const char string130[] PROGMEM = "princ";
-const char string131[] PROGMEM = "terpri";
-const char string132[] PROGMEM = "read-byte";
-const char string133[] PROGMEM = "read-line";
-const char string134[] PROGMEM = "write-byte";
-const char string135[] PROGMEM = "write-string";
-const char string136[] PROGMEM = "write-line";
-const char string137[] PROGMEM = "restart-i2c";
-const char string138[] PROGMEM = "gc";
-const char string139[] PROGMEM = "room";
-const char string140[] PROGMEM = "save-image";
-const char string141[] PROGMEM = "load-image";
-const char string142[] PROGMEM = "cls";
-const char string143[] PROGMEM = "pinmode";
-const char string144[] PROGMEM = "digitalread";
-const char string145[] PROGMEM = "digitalwrite";
-const char string146[] PROGMEM = "analogread";
-const char string147[] PROGMEM = "analogwrite";
-const char string148[] PROGMEM = "delay";
-const char string149[] PROGMEM = "millis";
-const char string150[] PROGMEM = "sleep";
-const char string151[] PROGMEM = "note";
-const char string152[] PROGMEM = "edit";
-const char string153[] PROGMEM = "pprint";
-const char string154[] PROGMEM = "pprintall";
+const char string81[] PROGMEM = "truncate";
+const char string82[] PROGMEM = "mod";
+const char string83[] PROGMEM = "1+";
+const char string84[] PROGMEM = "1-";
+const char string85[] PROGMEM = "abs";
+const char string86[] PROGMEM = "random";
+const char string87[] PROGMEM = "max";
+const char string88[] PROGMEM = "min";
+const char string89[] PROGMEM = "/=";
+const char string90[] PROGMEM = "=";
+const char string91[] PROGMEM = "<";
+const char string92[] PROGMEM = "<=";
+const char string93[] PROGMEM = ">";
+const char string94[] PROGMEM = ">=";
+const char string95[] PROGMEM = "plusp";
+const char string96[] PROGMEM = "minusp";
+const char string97[] PROGMEM = "zerop";
+const char string98[] PROGMEM = "oddp";
+const char string99[] PROGMEM = "evenp";
+const char string100[] PROGMEM = "integerp";
+const char string101[] PROGMEM = "numberp";
+const char string102[] PROGMEM = "char";
+const char string103[] PROGMEM = "char-code";
+const char string104[] PROGMEM = "code-char";
+const char string105[] PROGMEM = "characterp";
+const char string106[] PROGMEM = "stringp";
+const char string107[] PROGMEM = "string=";
+const char string108[] PROGMEM = "string<";
+const char string109[] PROGMEM = "string>";
+const char string110[] PROGMEM = "sort";
+const char string111[] PROGMEM = "string";
+const char string112[] PROGMEM = "concatenate";
+const char string113[] PROGMEM = "subseq";
+const char string114[] PROGMEM = "read-from-string";
+const char string115[] PROGMEM = "princ-to-string";
+const char string116[] PROGMEM = "prin1-to-string";
+const char string117[] PROGMEM = "logand";
+const char string118[] PROGMEM = "logior";
+const char string119[] PROGMEM = "logxor";
+const char string120[] PROGMEM = "lognot";
+const char string121[] PROGMEM = "ash";
+const char string122[] PROGMEM = "logbitp";
+const char string123[] PROGMEM = "eval";
+const char string124[] PROGMEM = "globals";
+const char string125[] PROGMEM = "locals";
+const char string126[] PROGMEM = "makunbound";
+const char string127[] PROGMEM = "break";
+const char string128[] PROGMEM = "read";
+const char string129[] PROGMEM = "prin1";
+const char string130[] PROGMEM = "print";
+const char string131[] PROGMEM = "princ";
+const char string132[] PROGMEM = "terpri";
+const char string133[] PROGMEM = "read-byte";
+const char string134[] PROGMEM = "read-line";
+const char string135[] PROGMEM = "write-byte";
+const char string136[] PROGMEM = "write-string";
+const char string137[] PROGMEM = "write-line";
+const char string138[] PROGMEM = "restart-i2c";
+const char string139[] PROGMEM = "gc";
+const char string140[] PROGMEM = "room";
+const char string141[] PROGMEM = "save-image";
+const char string142[] PROGMEM = "load-image";
+const char string143[] PROGMEM = "cls";
+const char string144[] PROGMEM = "pinmode";
+const char string145[] PROGMEM = "digitalread";
+const char string146[] PROGMEM = "digitalwrite";
+const char string147[] PROGMEM = "analogread";
+const char string148[] PROGMEM = "analogwrite";
+const char string149[] PROGMEM = "delay";
+const char string150[] PROGMEM = "millis";
+const char string151[] PROGMEM = "sleep";
+const char string152[] PROGMEM = "note";
+const char string153[] PROGMEM = "edit";
+const char string154[] PROGMEM = "pprint";
+const char string155[] PROGMEM = "pprintall";
 
 const tbl_entry_t lookup_table[] PROGMEM = {
   { string0, NULL, NIL, NIL },
@@ -2900,81 +2908,82 @@ const tbl_entry_t lookup_table[] PROGMEM = {
   { string77, fn_add, 0, 127 },
   { string78, fn_subtract, 1, 127 },
   { string79, fn_multiply, 0, 127 },
-  { string80, fn_divide, 1, 127 },
-  { string81, fn_mod, 2, 2 },
-  { string82, fn_oneplus, 1, 1 },
-  { string83, fn_oneminus, 1, 1 },
-  { string84, fn_abs, 1, 1 },
-  { string85, fn_random, 1, 1 },
-  { string86, fn_maxfn, 1, 127 },
-  { string87, fn_minfn, 1, 127 },
-  { string88, fn_noteq, 1, 127 },
-  { string89, fn_numeq, 1, 127 },
-  { string90, fn_less, 1, 127 },
-  { string91, fn_lesseq, 1, 127 },
-  { string92, fn_greater, 1, 127 },
-  { string93, fn_greatereq, 1, 127 },
-  { string94, fn_plusp, 1, 1 },
-  { string95, fn_minusp, 1, 1 },
-  { string96, fn_zerop, 1, 1 },
-  { string97, fn_oddp, 1, 1 },
-  { string98, fn_evenp, 1, 1 },
-  { string99, fn_integerp, 1, 1 },
-  { string100, fn_numberp, 1, 1 },
-  { string101, fn_char, 2, 2 },
-  { string102, fn_charcode, 1, 1 },
-  { string103, fn_codechar, 1, 1 },
-  { string104, fn_characterp, 1, 1 },
-  { string105, fn_stringp, 1, 1 },
-  { string106, fn_stringeq, 2, 2 },
-  { string107, fn_stringless, 2, 2 },
-  { string108, fn_stringgreater, 2, 2 },
-  { string109, fn_sort, 2, 2 },
-  { string110, fn_stringfn, 1, 1 },
-  { string111, fn_concatenate, 1, 127 },
-  { string112, fn_subseq, 2, 3 },
-  { string113, fn_readfromstring, 1, 1 },
-  { string114, fn_princtostring, 1, 1 },
-  { string115, fn_prin1tostring, 1, 1 },
-  { string116, fn_logand, 0, 127 },
-  { string117, fn_logior, 0, 127 },
-  { string118, fn_logxor, 0, 127 },
-  { string119, fn_lognot, 1, 1 },
-  { string120, fn_ash, 2, 2 },
-  { string121, fn_logbitp, 2, 2 },
-  { string122, fn_eval, 1, 1 },
-  { string123, fn_globals, 0, 0 },
-  { string124, fn_locals, 0, 0 },
-  { string125, fn_makunbound, 1, 1 },
-  { string126, fn_break, 0, 0 },
-  { string127, fn_read, 0, 1 },
-  { string128, fn_prin1, 1, 2 },
-  { string129, fn_print, 1, 2 },
-  { string130, fn_princ, 1, 2 },
-  { string131, fn_terpri, 0, 1 },
-  { string132, fn_readbyte, 0, 2 },
-  { string133, fn_readline, 0, 1 },
-  { string134, fn_writebyte, 1, 2 },
-  { string135, fn_writestring, 1, 2 },
-  { string136, fn_writeline, 1, 2 },
-  { string137, fn_restarti2c, 1, 2 },
-  { string138, fn_gc, 0, 0 },
-  { string139, fn_room, 0, 0 },
-  { string140, fn_saveimage, 0, 1 },
-  { string141, fn_loadimage, 0, 1 },
-  { string142, fn_cls, 0, 0 },
-  { string143, fn_pinmode, 2, 2 },
-  { string144, fn_digitalread, 1, 1 },
-  { string145, fn_digitalwrite, 2, 2 },
-  { string146, fn_analogread, 1, 1 },
-  { string147, fn_analogwrite, 2, 2 },
-  { string148, fn_delay, 1, 1 },
-  { string149, fn_millis, 0, 0 },
-  { string150, fn_sleep, 1, 1 },
-  { string151, fn_note, 0, 3 },
-  { string152, fn_edit, 1, 1 },
-  { string153, fn_pprint, 1, 2 },
-  { string154, fn_pprintall, 0, 0 },
+  { string80, fn_divide, 2, 127 },
+  { string81, fn_divide, 1, 2 },
+  { string82, fn_mod, 2, 2 },
+  { string83, fn_oneplus, 1, 1 },
+  { string84, fn_oneminus, 1, 1 },
+  { string85, fn_abs, 1, 1 },
+  { string86, fn_random, 1, 1 },
+  { string87, fn_maxfn, 1, 127 },
+  { string88, fn_minfn, 1, 127 },
+  { string89, fn_noteq, 1, 127 },
+  { string90, fn_numeq, 1, 127 },
+  { string91, fn_less, 1, 127 },
+  { string92, fn_lesseq, 1, 127 },
+  { string93, fn_greater, 1, 127 },
+  { string94, fn_greatereq, 1, 127 },
+  { string95, fn_plusp, 1, 1 },
+  { string96, fn_minusp, 1, 1 },
+  { string97, fn_zerop, 1, 1 },
+  { string98, fn_oddp, 1, 1 },
+  { string99, fn_evenp, 1, 1 },
+  { string100, fn_integerp, 1, 1 },
+  { string101, fn_numberp, 1, 1 },
+  { string102, fn_char, 2, 2 },
+  { string103, fn_charcode, 1, 1 },
+  { string104, fn_codechar, 1, 1 },
+  { string105, fn_characterp, 1, 1 },
+  { string106, fn_stringp, 1, 1 },
+  { string107, fn_stringeq, 2, 2 },
+  { string108, fn_stringless, 2, 2 },
+  { string109, fn_stringgreater, 2, 2 },
+  { string110, fn_sort, 2, 2 },
+  { string111, fn_stringfn, 1, 1 },
+  { string112, fn_concatenate, 1, 127 },
+  { string113, fn_subseq, 2, 3 },
+  { string114, fn_readfromstring, 1, 1 },
+  { string115, fn_princtostring, 1, 1 },
+  { string116, fn_prin1tostring, 1, 1 },
+  { string117, fn_logand, 0, 127 },
+  { string118, fn_logior, 0, 127 },
+  { string119, fn_logxor, 0, 127 },
+  { string120, fn_lognot, 1, 1 },
+  { string121, fn_ash, 2, 2 },
+  { string122, fn_logbitp, 2, 2 },
+  { string123, fn_eval, 1, 1 },
+  { string124, fn_globals, 0, 0 },
+  { string125, fn_locals, 0, 0 },
+  { string126, fn_makunbound, 1, 1 },
+  { string127, fn_break, 0, 0 },
+  { string128, fn_read, 0, 1 },
+  { string129, fn_prin1, 1, 2 },
+  { string130, fn_print, 1, 2 },
+  { string131, fn_princ, 1, 2 },
+  { string132, fn_terpri, 0, 1 },
+  { string133, fn_readbyte, 0, 2 },
+  { string134, fn_readline, 0, 1 },
+  { string135, fn_writebyte, 1, 2 },
+  { string136, fn_writestring, 1, 2 },
+  { string137, fn_writeline, 1, 2 },
+  { string138, fn_restarti2c, 1, 2 },
+  { string139, fn_gc, 0, 0 },
+  { string140, fn_room, 0, 0 },
+  { string141, fn_saveimage, 0, 1 },
+  { string142, fn_loadimage, 0, 1 },
+  { string143, fn_cls, 0, 0 },
+  { string144, fn_pinmode, 2, 2 },
+  { string145, fn_digitalread, 1, 1 },
+  { string146, fn_digitalwrite, 2, 2 },
+  { string147, fn_analogread, 1, 1 },
+  { string148, fn_analogwrite, 2, 2 },
+  { string149, fn_delay, 1, 1 },
+  { string150, fn_millis, 0, 0 },
+  { string151, fn_sleep, 1, 1 },
+  { string152, fn_note, 0, 3 },
+  { string153, fn_edit, 1, 1 },
+  { string154, fn_pprint, 1, 2 },
+  { string155, fn_pprintall, 0, 0 },
 };
 
 // Table lookup functions
@@ -3462,7 +3471,7 @@ void setup () {
   initworkspace();
   initenv();
   initsleep();
-  pfstring(PSTR("uLisp 2.3 "), pserial); pln(pserial);
+  pfstring(PSTR("uLisp 2.4 "), pserial); pln(pserial);
 }
 
 // Read/Evaluate/Print loop
