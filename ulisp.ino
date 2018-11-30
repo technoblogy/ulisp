@@ -1,5 +1,5 @@
-/* uLisp AVR Version 2.4 - www.ulisp.com
-   David Johnson-Davies - www.technoblogy.com - 9th October 2018
+/* uLisp AVR Version 2.5 - www.ulisp.com
+   David Johnson-Davies - www.technoblogy.com - 30th November 2018
 
    Licensed under the MIT license: https://opensource.org/licenses/MIT
 */
@@ -156,7 +156,7 @@ char LastPrint = 0;
 char PrintReadably = 1;
 
 // Flags
-enum flag { RETURNFLAG, ESCAPE, EXITEDITOR };
+enum flag { RETURNFLAG, ESCAPE, EXITEDITOR, LIBRARYLOADED };
 volatile char Flags;
 
 // Forward references
@@ -912,11 +912,11 @@ void serialend (int address) {
   #if defined(__AVR_ATmega328P__)
   (void) address;
   #elif defined(__AVR_ATmega1284P__)
-  if (address == 1) Serial1.end();
+  if (address == 1) {Serial1.flush(); Serial1.end(); }
   #elif defined(__AVR_ATmega2560__)
-  if (address == 1) Serial1.end();
-  else if (address == 2) Serial2.end();
-  else if (address == 3) Serial3.end();
+  if (address == 1) {Serial1.flush(); Serial1.end(); }
+  else if (address == 2) {Serial2.flush(); Serial2.end(); }
+  else if (address == 3) {Serial3.flush(); Serial3.end(); }
   #endif
 }
 
@@ -1422,6 +1422,7 @@ object *tf_return (object *args, object *env) {
 }
 
 object *tf_if (object *args, object *env) {
+  if (args == NULL || cdr(args) == NULL) error(PSTR("'if' missing argument(s)"));
   if (eval(first(args), env) != nil) return second(args);
   args = cddr(args);
   return (args != NULL) ? first(args) : nil;
@@ -1430,6 +1431,7 @@ object *tf_if (object *args, object *env) {
 object *tf_cond (object *args, object *env) {
   while (args != NULL) {
     object *clause = first(args);
+    if (!consp(clause)) error2(clause, PSTR("is an illegal clause"));
     object *test = eval(first(clause), env);
     object *forms = cdr(clause);
     if (test != nil) {
@@ -1441,11 +1443,13 @@ object *tf_cond (object *args, object *env) {
 }
 
 object *tf_when (object *args, object *env) {
+  if (args == NULL) error(PSTR("'when' missing argument"));
   if (eval(first(args), env) != nil) return tf_progn(cdr(args),env);
   else return nil;
 }
 
 object *tf_unless (object *args, object *env) {
+  if (args == NULL) error(PSTR("'unless' missing argument"));
   if (eval(first(args), env) != nil) return nil;
   else return tf_progn(cdr(args),env);
 }
@@ -2312,7 +2316,7 @@ object *fn_makunbound (object *args, object *env) {
   (void) env;
   object *key = first(args);
   deletesymbol(key->name);
-  return delassoc(key, &GlobalEnv);
+  return (delassoc(key, &GlobalEnv) != NULL) ? tee : nil;
 }
 
 object *fn_break (object *args, object *env) {
@@ -2586,7 +2590,7 @@ int atomwidth (object *obj) {
 }
 
 boolean quoted (object *obj) {
-  return (consp(obj) && (car(obj)->name == QUOTE) && consp(cdr(obj)) && (cddr(obj) == NULL));
+  return (consp(obj) && car(obj) != NULL && car(obj)->name == QUOTE && consp(cdr(obj)) && cddr(obj) == NULL);
 }
 
 int subwidth (object *obj, int w) {
@@ -3059,7 +3063,7 @@ object *eval (object *form, object *env) {
   EVAL:
   // Enough space?
   if (End != 0xA5) error(PSTR("Stack overflow"));
-  if (Freespace < 20) gc(form, env);
+  if (Freespace <= WORKSPACESIZE>>4) gc(form, env);
   // Escape
   if (tstflag(ESCAPE)) { clrflag(ESCAPE); error(PSTR("Escape!"));}
   #if defined (serialmonitor)
@@ -3467,11 +3471,12 @@ void initenv () {
 
 void setup () {
   Serial.begin(9600);
-  while (!Serial);
+  int start = millis();
+  while (millis() - start < 5000) { if (Serial) break; }
   initworkspace();
   initenv();
   initsleep();
-  pfstring(PSTR("uLisp 2.4 "), pserial); pln(pserial);
+  pfstring(PSTR("uLisp 2.5 "), pserial); pln(pserial);
 }
 
 // Read/Evaluate/Print loop
@@ -3513,12 +3518,13 @@ void loop () {
     if (autorun == 12) autorunimage();
   }
   // Come here after error
+  delay(100); while (Serial.available()) Serial.read();
   for (int i=0; i<TRACEMAX; i++) TraceDepth[i] = 0;
   #if defined(sdcardsupport)
   SDpfile.close(); SDgfile.close();
   #endif
   #if defined(lisplibrary)
-  loadfromlibrary(NULL);
+  if (!tstflag(LIBRARYLOADED)) { setflag(LIBRARYLOADED); loadfromlibrary(NULL); }
   #endif
   repl(NULL);
 }
