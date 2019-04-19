@@ -1,5 +1,5 @@
-/* uLisp AVR Version 2.6 - www.ulisp.com
-   David Johnson-Davies - www.technoblogy.com - 9th April 2019
+/* uLisp AVR Version 2.6a - www.ulisp.com
+   David Johnson-Davies - www.technoblogy.com - 19th April 2019
 
    Licensed under the MIT license: https://opensource.org/licenses/MIT
 */
@@ -2624,13 +2624,16 @@ object *fn_cls (object *args, object *env) {
 object *fn_pinmode (object *args, object *env) {
   (void) env;
   int pin = integer(first(args));
+  int pm = INPUT;
   object *mode = second(args);
-  if ((integerp(mode) && mode->integer == 1) || mode != nil) pinMode(pin, OUTPUT);
-  else if (integerp(mode) && mode->integer == 2) pinMode(pin, INPUT_PULLUP);
-  #if defined(INPUT_PULLDOWN)
-  else if (integerp(mode) && mode->integer == 4) pinMode(pin, INPUT_PULLDOWN);
-  #endif
-  else pinMode(pin, INPUT);
+  if (integerp(mode)) {
+    int nmode = integer(mode);
+    if (nmode == 1) pm = OUTPUT; else if (nmode == 2) pm = INPUT_PULLUP;
+    #if defined(INPUT_PULLDOWN)
+    else if (nmode == 4) pm = INPUT_PULLDOWN;
+    #endif
+  } else if (mode != nil) pm = OUTPUT;
+  pinMode(pin, pm);
   return nil;
 }
 
@@ -2772,9 +2775,9 @@ void superprint (object *form, int lm, pfun_t pfun) {
   else supersub(form, lm + PPINDENT, 1, pfun);
 }
 
-const int ppspecials = 14;
+const int ppspecials = 15;
 const char ppspecial[ppspecials] PROGMEM = 
-  { DOTIMES, DOLIST, IF, SETQ, TEE, LET, LETSTAR, LAMBDA, WHEN, UNLESS, WITHI2C, WITHSERIAL, WITHSPI, WITHSDCARD };
+  { DOTIMES, DOLIST, IF, SETQ, TEE, LET, LETSTAR, LAMBDA, WHEN, UNLESS, WITHI2C, WITHSERIAL, WITHSPI, WITHSDCARD, FORMILLIS };
 
 void supersub (object *form, int lm, int super, pfun_t pfun) {
   int special = 0, separate = 1;
@@ -3292,7 +3295,7 @@ object *eval (object *form, object *env) {
   object *function = car(form);
   object *args = cdr(form);
 
-  if (function == NULL) error(PSTR("'nil' is an illegal function"));
+  if (function == NULL) error3(NIL, PSTR("is an illegal function"));
   if (!listp(args)) error(PSTR("Can't evaluate a dotted pair"));
 
   // List starts with a symbol?
