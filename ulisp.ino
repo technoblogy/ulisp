@@ -21,6 +21,7 @@ const char LispLibrary[] PROGMEM = "";
 
 // #include "LispLibrary.h"
 #include <avr/sleep.h>
+#include <avr/eeprom.h>
 #include <setjmp.h>
 #include <SPI.h>
 #include <limits.h>
@@ -177,6 +178,28 @@ int builtin (char* n);
 void error (PGM_P string);
 void error3 (symbol_t name, PGM_P string);
 void pfstring (PGM_P s, pfun_t pfun);
+inline int maxbuffer (char *buffer);
+object *apply (object *function, object *args, object **env);
+void deletesymbol (symbol_t name);
+int glibrary ();
+int gserial ();
+boolean listp (object *x);
+char nthchar (object *string, int n);
+uint8_t lookupmax (symbol_t name);
+uint8_t lookupmin (symbol_t name);
+char *lookupsymbol (symbol_t name);
+void pfl (pfun_t pfun);
+inline void pln (pfun_t pfun);
+void pint (int i, pfun_t pfun);
+void printstring (object *form, pfun_t pfun);
+void pserial (char c);
+void pstring (char *s, pfun_t pfun);
+int subwidthlist (object *form, int w);
+void superprint (object *form, int lm, pfun_t pfun);
+void supersub (object *form, int lm, int super, pfun_t pfun);
+void testescape ();
+object *read (gfun_t gfun);
+object *edit (object *fun);
 
 // Set up workspace
 
@@ -3260,7 +3283,7 @@ uint8_t End;
 object *eval (object *form, object *env) {
   int TC=0;
   EVAL:
-  yield(); // Needed on ESP8266 to avoid Soft WDT Reset
+  // yield(); // Needed on ESP8266 to avoid Soft WDT Reset
   // Enough space?
   if (End != 0xA5) error(PSTR("Stack overflow"));
   if (Freespace <= WORKSPACESIZE>>4) gc(form, env);
