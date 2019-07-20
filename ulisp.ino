@@ -1,5 +1,5 @@
-/* uLisp AVR Version 2.7c - www.ulisp.com
-   David Johnson-Davies - www.technoblogy.com - 20th June 2019
+/* uLisp AVR Version 2.8 - www.ulisp.com
+   David Johnson-Davies - www.technoblogy.com - 20th July 2019
 
    Licensed under the MIT license: https://opensource.org/licenses/MIT
 */
@@ -169,14 +169,14 @@ object *tee;
 object *tf_progn (object *form, object *env);
 object *eval (object *form, object *env);
 object *read ();
-void repl(object *env);
+void repl (object *env);
 void printobject (object *form, pfun_t pfun);
 char *lookupbuiltin (symbol_t name);
 intptr_t lookupfn (symbol_t name);
 int builtin (char* n);
-void error (PGM_P string);
-void error3 (symbol_t name, PGM_P string);
 void pfstring (PGM_P s, pfun_t pfun);
+void error (symbol_t fname, PGM_P string, object *symbol);
+void error2 (symbol_t fname, PGM_P string);
 
 // Set up workspace
 
@@ -192,7 +192,7 @@ void initworkspace () {
 }
 
 object *myalloc () {
-  if (Freespace == 0) error(PSTR("No room"));
+  if (Freespace == 0) error2(0, PSTR("no room"));
   object *temp = Freelist;
   Freelist = cdr(Freelist);
   Freespace--;
@@ -397,8 +397,8 @@ unsigned int saveimage (object *arg) {
     file = SD.open(MakeFilename(arg), O_RDWR | O_CREAT | O_TRUNC);
     arg = NULL;
   } else if (arg == NULL || listp(arg)) file = SD.open("/ULISP.IMG", O_RDWR | O_CREAT | O_TRUNC);
-  else error3(SAVEIMAGE, PSTR("illegal argument"));
-  if (!file) error(PSTR("Problem saving to SD card"));
+  else error(SAVEIMAGE, PSTR("illegal argument"), arg);
+  if (!file) error2(SAVEIMAGE, PSTR("problem saving to SD card"));
   SDWriteInt(file, (uintptr_t)arg);
   SDWriteInt(file, imagesize);
   SDWriteInt(file, (uintptr_t)GlobalEnv);
@@ -415,14 +415,9 @@ unsigned int saveimage (object *arg) {
   file.close();
   return imagesize;
 #else
-  if (!(arg == NULL || listp(arg))) error3(SAVEIMAGE, PSTR(" illegal argument"));
+  if (!(arg == NULL || listp(arg))) error(SAVEIMAGE, PSTR("illegal argument"), arg);
   int bytesneeded = imagesize*4 + SYMBOLTABLESIZE + 10;
-  if (bytesneeded > EEPROMSIZE) {
-    pfstring(PSTR("Error: Image size too large: "), pserial);
-    pint(imagesize, pserial); pln(pserial);
-    GCStack = NULL;
-    longjmp(exception, 1);
-  }
+  if (bytesneeded > EEPROMSIZE) error(SAVEIMAGE, PSTR("image size too large"), number(imagesize));
   eeprom_update_word(&image.datasize, imagesize);
   eeprom_update_word(&image.eval, (unsigned int)arg);
   eeprom_update_word(&image.globalenv, (unsigned int)GlobalEnv);
@@ -449,8 +444,8 @@ unsigned int loadimage (object *arg) {
   File file;
   if (stringp(arg)) file = SD.open(MakeFilename(arg));
   else if (arg == NULL) file = SD.open("/ULISP.IMG");
-  else error3(LOADIMAGE, PSTR("illegal argument"));
-  if (!file) error(PSTR("Problem loading from SD card"));
+  else error(LOADIMAGE, PSTR("illegal argument"), arg);
+  if (!file) error2(LOADIMAGE, PSTR("problem loading from SD card"));
   SDReadInt(file);
   int imagesize = SDReadInt(file);
   GlobalEnv = (object *)SDReadInt(file);
@@ -469,7 +464,7 @@ unsigned int loadimage (object *arg) {
   return imagesize;
 #else
   unsigned int imagesize = eeprom_read_word(&image.datasize);
-  if (imagesize == 0 || imagesize == 0xFFFF) error(PSTR("No saved image"));
+  if (imagesize == 0 || imagesize == 0xFFFF) error2(LOADIMAGE, PSTR("no saved image"));
   GlobalEnv = (object *)eeprom_read_word(&image.globalenv);
   GCStack = (object *)eeprom_read_word(&image.gcstack);
   #if SYMBOLTABLESIZE > BUFFERSIZE
@@ -486,48 +481,59 @@ void autorunimage () {
 #if defined(sdcardsupport)
   SD.begin(SDCARD_SS_PIN);
   File file = SD.open("ULISP.IMG");
-  if (!file) error(PSTR("Problem autorunning from SD card"));
+  if (!file) error2(0, PSTR("problem autorunning from SD card"));
   object *autorun = (object *)SDReadInt(file);
   file.close();
   if (autorun != NULL) {
     loadimage(NULL);
-    apply(autorun, NULL, NULL);
+    apply(0, autorun, NULL, NULL);
   }
 #else
   object *autorun = (object *)eeprom_read_word(&image.eval);
   if (autorun != NULL && (unsigned int)autorun != 0xFFFF) {
     loadimage(nil);
-    apply(autorun, NULL, NULL);
+    apply(0, autorun, NULL, NULL);
   }
 #endif
 }
 
 // Error handling
 
-void error (PGM_P string) {
+void errorsub (symbol_t fname, PGM_P string) {
   pfl(pserial); pfstring(PSTR("Error: "), pserial);
-  pfstring(string, pserial); pln(pserial);
+  if (fname) {
+    pserial('\''); 
+    pstring(symbolname(fname), pserial);
+    pfstring(PSTR("' "), pserial);
+  }
+  pfstring(string, pserial);
+}
+
+void error (symbol_t fname, PGM_P string, object *symbol) {
+  errorsub(fname, string);
+  pfstring(PSTR(": "), pserial); printobject(symbol, pserial);
+  pln(pserial);
   GCStack = NULL;
   longjmp(exception, 1);
 }
 
-void error2 (object *symbol, PGM_P string) {
-  pfl(pserial); pfstring(PSTR("Error: "), pserial);
-  if (symbol == NULL) pfstring(PSTR("function "), pserial);
-  else { pserial('\''); printobject(symbol, pserial); pfstring(PSTR("' "), pserial); }
-  pfstring(string, pserial); pln(pserial);
+void error2 (symbol_t fname, PGM_P string) {
+  errorsub(fname, string);
+  pln(pserial);
   GCStack = NULL;
   longjmp(exception, 1);
 }
 
-void error3 (symbol_t name, PGM_P string) {
-  pfl(pserial); pfstring(PSTR("Error: "), pserial);
-  if (symbol == NULL) pfstring(PSTR("function "), pserial);
-  else { pserial('\''); pstring(lookupbuiltin(name), pserial); pfstring(PSTR("' "), pserial); }
-  pfstring(string, pserial); pln(pserial);
-  GCStack = NULL;
-  longjmp(exception, 1);
-}
+// Save space as these are used multiple times
+const char notanumber[] PROGMEM = "argument is not a number";
+const char notastring[] PROGMEM = "argument is not a string";
+const char notalist[] PROGMEM = "argument is not a list";
+const char notproper[] PROGMEM = "argument is not a proper list";
+const char notproper2[] PROGMEM = "second argument is not a proper list";
+const char notproper3[] PROGMEM = "third argument is not a proper list";
+const char noargument[] PROGMEM = "missing argument";
+const char nostream[] PROGMEM = "missing stream argument";
+const char overflow[] PROGMEM = "arithmetic overflow";
 
 // Tracing
 
@@ -541,13 +547,13 @@ boolean tracing (symbol_t name) {
 }
 
 void trace (symbol_t name) {
-  if (tracing(name)) error(PSTR("Already being traced"));
+  if (tracing(name)) error(TRACE, PSTR("already being traced"), symbol(name));
   int i = 0;
   while (i < TRACEMAX) {
     if (TraceFn[i] == 0) { TraceFn[i] = name; TraceDepth[i] = 0; return; }
     i++;
   }
-  error(PSTR("Already tracing 3 functions"));
+  error2(TRACE, PSTR("already tracing 3 functions"));
 }
 
 void untrace (symbol_t name) {
@@ -556,7 +562,7 @@ void untrace (symbol_t name) {
     if (TraceFn[i] == name) { TraceFn[i] = 0; return; }
     i++;
   }
-  error(PSTR("It wasn't being traced"));
+  error(UNTRACE, PSTR("not tracing"), symbol(name));
 }
 
 // Helper functions
@@ -580,6 +586,7 @@ boolean listp (object *x) {
 }
 
 boolean improperp (object *x) {
+  if (x == NULL) return false;
   unsigned int type = x->type;
   return type < PAIR && type != ZERO;
 }
@@ -613,9 +620,7 @@ int digitvalue (char d) {
   return 16;
 }
 
-char *name (object *obj){
-  if (obj->type != SYMBOL) error(PSTR("Error in name"));
-  symbol_t x = obj->name;
+char *symbolname (symbol_t x) {
   if (x < ENDFUNCTIONS) return lookupbuiltin(x);
   else if (x >= 64000) return lookupsymbol(x);
   char *buffer = SymbolTop;
@@ -627,23 +632,30 @@ char *name (object *obj){
   return buffer;
 }
 
-int integer (object *obj){
-  if (!integerp(obj)) error2(obj, PSTR("is not an integer"));
+int checkinteger (symbol_t name, object *obj) {
+  if (!integerp(obj)) error(name, PSTR("argument is not an integer"), obj);
   return obj->integer;
 }
 
-int fromchar (object *obj){
-  if (!characterp(obj)) error2(obj, PSTR("is not a character"));
+int checkchar (symbol_t name, object *obj) {
+  if (!characterp(obj)) error(name, PSTR("argument is not a character"), obj);
   return obj->integer;
 }
 
-int istream (object *obj){
-  if (!streamp(obj)) error2(obj, PSTR("is not a stream"));
+int isstream (object *obj){
+  if (!streamp(obj)) error(0, PSTR("not a stream"), obj);
   return obj->integer;
 }
 
 int issymbol (object *obj, symbol_t n) {
   return symbolp(obj) && obj->name == n;
+}
+
+void checkargs (symbol_t name, object *args) {
+  int nargs = listlength(name, args);
+  if (name >= ENDFUNCTIONS) error(0, PSTR("not valid here"), symbol(name));
+  if (nargs<lookupmin(name)) error2(name, PSTR("has too few arguments"));
+  if (nargs>lookupmax(name)) error2(name, PSTR("has too many arguments"));
 }
 
 int eq (object *arg1, object *arg2) {
@@ -656,10 +668,10 @@ int eq (object *arg1, object *arg2) {
   return false;
 }
 
-int listlength (object *list) {
+int listlength (symbol_t name, object *list) {
   int length = 0;
   while (list != NULL) {
-    if (improperp(list)) error(PSTR("List argument is not a proper list"));
+    if (improperp(list)) error2(name, notproper);
     list = cdr(list);
     length++;
   }
@@ -670,9 +682,9 @@ int listlength (object *list) {
 
 object *assoc (object *key, object *list) {
   while (list != NULL) {
-    if (improperp(list)) error3(ASSOC, PSTR("argument is not a proper list"));
+    if (improperp(list)) error(ASSOC, notproper, list);
     object *pair = first(list);
-    if (!listp(pair)) error2(pair, PSTR("in 'assoc' is not a list"));
+    if (!listp(pair)) error(ASSOC, PSTR("element is not a list"), pair);
     if (pair != NULL && eq(key,car(pair))) return pair;
     list = cdr(list);
   }
@@ -777,19 +789,19 @@ object *findvalue (object *var, object *env) {
   symbol_t varname = var->name;
   object *pair = value(varname, env);
   if (pair == NULL) pair = value(varname, GlobalEnv);
-  if (pair == NULL) error2(var, PSTR("unknown variable"));
+  if (pair == NULL) error(0, PSTR("unknown variable"), var);
   return pair;
 }
 
 // Handling closures
   
-object *closure (int tc, object *fname, object *state, object *function, object *args, object **env) {
+object *closure (int tc, symbol_t name, object *state, object *function, object *args, object **env) {
   int trace = 0;
-  if (fname != NULL) trace = tracing(fname->name);
+  if (name) trace = tracing(name);
   if (trace) {
     indent(TraceDepth[trace-1]<<1, pserial);
     pint(TraceDepth[trace-1]++, pserial);
-    pserial(':'); pserial(' '); pserial('('); printobject(fname, pserial);
+    pserial(':'); pserial(' '); pserial('('); pstring(lookupbuiltin(name), pserial);
   }
   object *params = first(function);
   function = cdr(function);
@@ -814,13 +826,13 @@ object *closure (int tc, object *fname, object *state, object *function, object 
     if (symbolp(var) && var->name == OPTIONAL) optional = true;  
     else {
       if (consp(var)) {
-        if (!optional) error2(fname, PSTR("invalid default value"));
+        if (!optional) error(name, PSTR("invalid default value"), var);
         if (args == NULL) value = eval(second(var), *env);
         else { value = first(args); args = cdr(args); }
         var = first(var);
-        if (!symbolp(var)) error2(fname, PSTR("illegal optional parameter")); 
+        if (!symbolp(var)) error(name, PSTR("illegal optional parameter"), var); 
       } else if (!symbolp(var)) {
-        error2(fname, PSTR("illegal parameter"));     
+        error2(name, PSTR("illegal parameter"));     
       } else if (var->name == AMPREST) {
         params = cdr(params);
         var = first(params);
@@ -829,7 +841,10 @@ object *closure (int tc, object *fname, object *state, object *function, object 
       } else {
         if (args == NULL) {
           if (optional) value = nil; 
-          else error2(fname, PSTR("has too few arguments"));
+          else {
+            if (name) error2(name, PSTR("has too few arguments"));
+            else error2(0, PSTR("function has too few arguments"));
+          }
         } else { value = first(args); args = cdr(args); }
       }
       push(cons(var,value), *env);
@@ -837,76 +852,76 @@ object *closure (int tc, object *fname, object *state, object *function, object 
     }
     params = cdr(params);  
   }
-  if (args != NULL) error2(fname, PSTR("has too many arguments"));
+  if (args != NULL) {
+    if (name) error2(name, PSTR("has too many arguments"));
+    else error2(0, PSTR("function has too many arguments"));
+  }
   if (trace) { pserial(')'); pln(pserial); }
   // Do an implicit progn
   if (tc) push(nil, *env);
   return tf_progn(function, *env);
 }
 
-object *apply (object *function, object *args, object *env) {
+object *apply (symbol_t name, object *function, object *args, object *env) {
   if (symbolp(function)) {
-    symbol_t name = function->name;
-    int nargs = listlength(args);
-    if (name >= ENDFUNCTIONS) error2(function, PSTR("is not valid here"));
-    if (nargs<lookupmin(name)) error2(function, PSTR("has too few arguments"));
-    if (nargs>lookupmax(name)) error2(function, PSTR("has too many arguments"));
-    return ((fn_ptr_type)lookupfn(name))(args, env);
+    symbol_t fname = function->name;
+    checkargs(fname, args);
+    return ((fn_ptr_type)lookupfn(fname))(args, env);
   }
   if (listp(function) && issymbol(car(function), LAMBDA)) {
     function = cdr(function);
-    object *result = closure(0, NULL, NULL, function, args, &env);
+    object *result = closure(0, 0, NULL, function, args, &env);
     return eval(result, env);
   }
   if (listp(function) && issymbol(car(function), CLOSURE)) {
     function = cdr(function);
-    object *result = closure(0, NULL, car(function), cdr(function), args, &env);
+    object *result = closure(0, 0, car(function), cdr(function), args, &env);
     return eval(result, env);
   }
-  error2(function, PSTR("is an illegal function"));
+  error(name, PSTR("illegal function"), function);
   return NULL;
 }
 
 // In-place operations
 
-object **place (object *args, object *env) {
+object **place (symbol_t name, object *args, object *env) {
   if (atom(args)) return &cdr(findvalue(args, env));
   object* function = first(args);
   if (issymbol(function, CAR) || issymbol(function, FIRST)) {
     object *value = eval(second(args), env);
-    if (!listp(value)) error(PSTR("Can't take car"));
+    if (!listp(value)) error(name, PSTR("can't take car"), value);
     return &car(value);
   }
   if (issymbol(function, CDR) || issymbol(function, REST)) {
     object *value = eval(second(args), env);
-    if (!listp(value)) error(PSTR("Can't take cdr"));
+    if (!listp(value)) error(name, PSTR("can't take cdr"), value);
     return &cdr(value);
   }
   if (issymbol(function, NTH)) {
-    int index = integer(eval(second(args), env));
+    int index = checkinteger(NTH, eval(second(args), env));
     object *list = eval(third(args), env);
-    if (atom(list)) error(PSTR("'nth' second argument is not a list"));
+    if (atom(list)) error(name, PSTR("second argument to nth is not a list"), list);
     while (index > 0) {
       list = cdr(list);
-      if (list == NULL) error(PSTR("'nth' index out of range"));
+      if (list == NULL) error2(name, PSTR("index to nth is out of range"));
       index--;
     }
     return &car(list);
   }
-  error(PSTR("Illegal place"));
+  error2(name, PSTR("illegal place"));
   return nil;
 }
 
 // Checked car and cdr
 
 inline object *carx (object *arg) {
-  if (!listp(arg)) error(PSTR("Can't take car"));
+  if (!listp(arg)) error(0, PSTR("Can't take car"), arg);
   if (arg == nil) return nil;
   return car(arg);
 }
 
 inline object *cdrx (object *arg) {
-  if (!listp(arg)) error(PSTR("Can't take cdr"));
+  if (!listp(arg)) error(0, PSTR("Can't take cdr"), arg);
   if (arg == nil) return nil;
   return cdr(arg);
 }
@@ -1008,12 +1023,12 @@ void serialbegin (int address, int baud) {
   (void) address; (void) baud;
   #elif defined(__AVR_ATmega1284P__)
   if (address == 1) Serial1.begin((long)baud*100);
-  else error(PSTR("'with-serial' port not supported"));
+  else error(WITHSERIAL, PSTR("port not supported"), number(address));
   #elif defined(__AVR_ATmega2560__)
   if (address == 1) Serial1.begin((long)baud*100);
   else if (address == 2) Serial2.begin((long)baud*100);
   else if (address == 3) Serial3.begin((long)baud*100);
-  else error(PSTR("'with-serial' port not supported"));
+  else error(WITHSERIAL, PSTR("port not supported"), number(address));
   #endif
 }
 
@@ -1034,7 +1049,7 @@ gfun_t gstreamfun (object *args) {
   int address = 0;
   gfun_t gfun = gserial;
   if (args != NULL) {
-    int stream = istream(first(args));
+    int stream = isstream(first(args));
     streamtype = stream>>8; address = stream & 0xFF;
   }
   if (streamtype == I2CSTREAM) gfun = (gfun_t)I2Cread;
@@ -1052,7 +1067,7 @@ gfun_t gstreamfun (object *args) {
   #if defined(sdcardsupport)
   else if (streamtype == SDSTREAM) gfun = (gfun_t)SDread;
   #endif
-  else error(PSTR("Unknown stream type"));
+  else error2(0, PSTR("Unknown stream type"));
   return gfun;
 }
 
@@ -1073,7 +1088,7 @@ pfun_t pstreamfun (object *args) {
   int address = 0;
   pfun_t pfun = pserial;
   if (args != NULL && first(args) != NULL) {
-    int stream = istream(first(args));
+    int stream = isstream(first(args));
     streamtype = stream>>8; address = stream & 0xFF;
   }
   if (streamtype == I2CSTREAM) pfun = (pfun_t)I2Cwrite;
@@ -1091,7 +1106,7 @@ pfun_t pstreamfun (object *args) {
   #if defined(sdcardsupport)
   else if (streamtype == SDSTREAM) pfun = (pfun_t)SDwrite;
   #endif
-  else error(PSTR("unknown stream type"));
+  else error2(0, PSTR("unknown stream type"));
   return pfun;
 }
 
@@ -1099,21 +1114,21 @@ pfun_t pstreamfun (object *args) {
 
 void checkanalogread (int pin) {
 #if defined(__AVR_ATmega328P__)
-  if (!(pin>=0 && pin<=5)) error(PSTR("'analogread' invalid pin"));
+  if (!(pin>=0 && pin<=5)) error(ANALOGREAD, PSTR("invalid pin"), number(pin));
 #elif defined(__AVR_ATmega2560__)
-  if (!(pin>=0 && pin<=15)) error(PSTR("'analogread' invalid pin"));
+  if (!(pin>=0 && pin<=15)) error(ANALOGREAD, PSTR("invalid pin"), number(pin));
 #elif defined(__AVR_ATmega1284P__)
-  if (!(pin>=0 && pin<=7)) error(PSTR("'analogread' invalid pin"));
+  if (!(pin>=0 && pin<=7)) error(ANALOGREAD, PSTR("invalid pin"), number(pin));
 #endif
 }
 
 void checkanalogwrite (int pin) {
 #if defined(__AVR_ATmega328P__)
-  if (!(pin>=3 && pin<=11 && pin!=4 && pin!=7 && pin!=8)) error(PSTR("'analogwrite' invalid pin"));
+  if (!(pin>=3 && pin<=11 && pin!=4 && pin!=7 && pin!=8)) error(ANALOGWRITE, PSTR("invalid pin"), number(pin));
 #elif defined(__AVR_ATmega2560__)
-  if (!((pin>=2 && pin<=13) || (pin>=44 && pin <=46))) error(PSTR("'analogwrite' invalid pin"));
+  if (!((pin>=2 && pin<=13) || (pin>=44 && pin <=46))) error(ANALOGWRITE, PSTR("invalid pin"), number(pin));
 #elif defined(__AVR_ATmega1284P__)
-  if (!(pin==3 || pin==4 || pin==6 || pin==7 || (pin>=12 && pin<=15))) error(PSTR("'analogwrite' invalid pin"));
+  if (!(pin==3 || pin==4 || pin==6 || pin==7 || (pin>=12 && pin<=15))) error(ANALOGWRITE, PSTR("invalid pin"), number(pin));
 #endif
 }
 
@@ -1129,9 +1144,9 @@ void playnote (int pin, int note, int octave) {
   } else if (pin == 11) {
     DDRB = DDRB | 1<<DDB3; // PB3 (Arduino D11) as output
     TCCR2A = 1<<COM2A0 | 0<<COM2B0 | 2<<WGM20; // Toggle OC2A on match
-  } else error(PSTR("'note' pin not supported"));
+  } else error(NOTE, PSTR("invalid pin"), number(pin));
   int prescaler = 9 - octave - note/12;
-  if (prescaler<3 || prescaler>6) error(PSTR("'note' octave out of range"));
+  if (prescaler<3 || prescaler>6) error(NOTE, PSTR("octave out of range"), number(prescaler));
   OCR2A = pgm_read_byte(&scale[note%12]) - 1;
   TCCR2B = 0<<WGM22 | prescaler<<CS20;
 
@@ -1142,9 +1157,9 @@ void playnote (int pin, int note, int octave) {
   } else if (pin == 10) {
     DDRB = DDRB | 1<<DDB4; // PB4 (Arduino D10) as output
     TCCR2A = 1<<COM2A0 | 0<<COM2B0 | 2<<WGM20; // Toggle OC2A on match
-  } else error(PSTR("'note' pin not supported"));
+  } else error(NOTE, PSTR("invalid pin"), number(pin));
   int prescaler = 9 - octave - note/12;
-  if (prescaler<3 || prescaler>6) error(PSTR("'note' octave out of range"));
+  if (prescaler<3 || prescaler>6) error(NOTE, PSTR("octave out of range"), number(prescaler));
   OCR2A = pgm_read_byte(&scale[note%12]) - 1;
   TCCR2B = 0<<WGM22 | prescaler<<CS20;
 
@@ -1155,9 +1170,9 @@ void playnote (int pin, int note, int octave) {
   } else if (pin == 15) {
     DDRD = DDRD | 1<<DDD7; // PD7 (Arduino D15) as output
     TCCR2A = 1<<COM2A0 | 0<<COM2B0 | 2<<WGM20; // Toggle OC2A on match
-  } else error(PSTR("'note' pin not supported"));
+  } else error(NOTE, PSTR("invalid pin"), number(pin));
   int prescaler = 9 - octave - note/12;
-  if (prescaler<3 || prescaler>6) error(PSTR("'note' octave out of range"));
+  if (prescaler<3 || prescaler>6) error(NOTE, PSTR("octave out of range"), number(prescaler));
   OCR2A = pgm_read_byte(&scale[note%12]) - 1;
   TCCR2B = 0<<WGM22 | prescaler<<CS20;
   #endif
@@ -1211,13 +1226,15 @@ void sleep (int secs) {
 
 object *sp_quote (object *args, object *env) {
   (void) env;
+  checkargs(QUOTE, args); 
   return first(args);
 }
 
 object *sp_defun (object *args, object *env) {
   (void) env;
+  checkargs(DEFUN, args);
   object *var = first(args);
-  if (var->type != SYMBOL) error2(var, PSTR("is not a symbol"));
+  if (var->type != SYMBOL) error(DEFUN, PSTR("not a symbol"), var);
   object *val = cons(symbol(LAMBDA), cdr(args));
   object *pair = value(var->name,GlobalEnv);
   if (pair != NULL) { cdr(pair) = val; return var; }
@@ -1226,18 +1243,19 @@ object *sp_defun (object *args, object *env) {
 }
 
 object *sp_defvar (object *args, object *env) {
+  checkargs(DEFVAR, args);
   object *var = first(args);
-  if (var->type != SYMBOL) error2(var, PSTR("is not a symbol"));
+  if (var->type != SYMBOL) error(DEFVAR, PSTR("not a symbol"), var);
   object *val = NULL;
-  args = cdr(args);
-  if (args != NULL) val = eval(first(args), env);
-  object *pair = value(var->name,GlobalEnv);
+  val = eval(second(args), env);
+  object *pair = value(var->name, GlobalEnv);
   if (pair != NULL) { cdr(pair) = val; return var; }
   push(cons(var, val), GlobalEnv);
   return var;
 }
 
 object *sp_setq (object *args, object *env) {
+  checkargs(SETQ, args);
   object *arg = eval(second(args), env);
   object *pair = findvalue(first(args), env);
   cdr(pair) = arg;
@@ -1261,14 +1279,16 @@ object *sp_loop (object *args, object *env) {
 }
 
 object *sp_push (object *args, object *env) {
+  checkargs(PUSH, args); 
   object *item = eval(first(args), env);
-  object **loc = place(second(args), env);
+  object **loc = place(PUSH, second(args), env);
   push(item, *loc);
   return *loc;
 }
 
 object *sp_pop (object *args, object *env) {
-  object **loc = place(first(args), env);
+  checkargs(POP, args); 
+  object **loc = place(POP, first(args), env);
   object *result = car(*loc);
   pop(*loc);
   return result;
@@ -1277,14 +1297,15 @@ object *sp_pop (object *args, object *env) {
 // Special forms incf/decf
 
 object *sp_incf (object *args, object *env) {
-  object **loc = place(first(args), env);
+  checkargs(INCF, args); 
+  object **loc = place(INCF, first(args), env);
   int increment = 1;
-  int result = integer(*loc);
+  int result = checkinteger(INCF, *loc);
   args = cdr(args);
-  if (args != NULL) increment = integer(eval(first(args), env));
+  if (args != NULL) increment = checkinteger(INCF, eval(first(args), env));
   #if defined(checkoverflow)
-  if (increment < 1) { if (INT_MIN - increment > result) error3(INCF, PSTR("arithmetic overflow")); }
-  else { if (INT_MAX - increment < result) error3(INCF, PSTR("arithmetic overflow")); }
+  if (increment < 1) { if (INT_MIN - increment > result) error2(INCF, overflow); }
+  else { if (INT_MAX - increment < result) error2(INCF, overflow); }
   #endif
   result = result + increment;
   *loc = number(result);
@@ -1292,14 +1313,15 @@ object *sp_incf (object *args, object *env) {
 }
 
 object *sp_decf (object *args, object *env) {
-  object **loc = place(first(args), env);
+  checkargs(DECF, args); 
+  object **loc = place(DECF, first(args), env);
   int decrement = 1;
-  int result = integer(*loc);
+  int result = checkinteger(DECF, *loc);
   args = cdr(args);
-  if (args != NULL) decrement = integer(eval(first(args), env));
+  if (args != NULL) decrement = checkinteger(DECF, eval(first(args), env));
   #if defined(checkoverflow)
-  if (decrement < 1) { if (INT_MAX + decrement < result) error3(DECF, PSTR("arithmetic overflow")); }
-  else { if (INT_MIN + decrement > result) error3(DECF, PSTR("arithmetic overflow")); }
+  if (decrement < 1) { if (INT_MAX + decrement < result) error2(DECF, overflow); }
+  else { if (INT_MIN + decrement > result) error2(DECF, overflow); }
   #endif
   result = result - decrement;
   *loc = number(result);
@@ -1307,13 +1329,15 @@ object *sp_decf (object *args, object *env) {
 }
 
 object *sp_setf (object *args, object *env) {
-  object **loc = place(first(args), env);
+  checkargs(SETF, args); 
+  object **loc = place(SETF, first(args), env);
   object *result = eval(second(args), env);
   *loc = result;
   return result;
 }
 
 object *sp_dolist (object *args, object *env) {
+  if (args == NULL) error2(DOLIST, noargument);
   object *params = first(args);
   object *var = first(params);
   object *result;
@@ -1324,7 +1348,7 @@ object *sp_dolist (object *args, object *env) {
   params = cdr(cdr(params));
   object *forms = cdr(args);
   while (list != NULL) {
-    if (improperp(list)) error3(DOLIST, PSTR("argument is not a proper list"));
+    if (improperp(list)) error(DOLIST, notproper, list);
     cdr(pair) = first(list);
     list = cdr(list);
     result = eval(tf_progn(forms,env), env);
@@ -1340,10 +1364,11 @@ object *sp_dolist (object *args, object *env) {
 }
 
 object *sp_dotimes (object *args, object *env) {
+  if (args == NULL) error2(DOTIMES, noargument);
   object *params = first(args);
   object *var = first(params);
   object *result;
-  int count = integer(eval(second(params), env));
+  int count = checkinteger(DOTIMES, eval(second(params), env));
   int index = 0;
   params = cdr(cdr(params));
   object *pair = cons(var,number(0));
@@ -1399,7 +1424,7 @@ object *sp_formillis (object *args, object *env) {
   object *param = first(args);
   unsigned long start = millis();
   unsigned long now, total = 0;
-  if (param != NULL) total = integer(eval(first(param), env));
+  if (param != NULL) total = checkinteger(FORMILLIS, eval(first(param), env));
   eval(tf_progn(cdr(args),env), env);
   do {
     now = millis() - start;
@@ -1411,11 +1436,12 @@ object *sp_formillis (object *args, object *env) {
 
 object *sp_withserial (object *args, object *env) {
   object *params = first(args);
+  if (params == NULL) error2(WITHSERIAL, nostream);
   object *var = first(params);
-  int address = integer(eval(second(params), env));
+  int address = checkinteger(WITHSERIAL, eval(second(params), env));
   params = cddr(params);
   int baud = 96;
-  if (params != NULL) baud = integer(eval(first(params), env));
+  if (params != NULL) baud = checkinteger(WITHSERIAL, eval(first(params), env));
   object *pair = cons(var, stream(SERIALSTREAM, address));
   push(pair,env);
   serialbegin(address, baud);
@@ -1427,14 +1453,15 @@ object *sp_withserial (object *args, object *env) {
 
 object *sp_withi2c (object *args, object *env) {
   object *params = first(args);
+  if (params == NULL) error2(WITHI2C, nostream);
   object *var = first(params);
-  int address = integer(eval(second(params), env));
+  int address = checkinteger(WITHI2C, eval(second(params), env));
   params = cddr(params);
   int read = 0; // Write
   I2CCount = 0;
   if (params != NULL) {
     object *rw = eval(first(params), env);
-    if (integerp(rw)) I2CCount = integer(rw);
+    if (integerp(rw)) I2CCount = rw->integer;
     read = (rw != NULL);
   }
   I2Cinit(1); // Pullups
@@ -1448,55 +1475,58 @@ object *sp_withi2c (object *args, object *env) {
 
 object *sp_withspi (object *args, object *env) {
   object *params = first(args);
+  if (params == NULL) error2(WITHSPI, nostream);
   object *var = first(params);
-  int pin = integer(eval(second(params), env));
-  int divider = 0, mode = 0, bitorder = 1;
+  params = cdr(params);
+  if (params == NULL) error2(WITHSPI, nostream);
+  int pin = checkinteger(WITHSPI, eval(car(params), env));
+  pinMode(pin, OUTPUT);
+  digitalWrite(pin, HIGH);
+  params = cdr(params);
+  int clock = 4000, mode = SPI_MODE0; // Defaults
+  BitOrder bitorder = MSBFIRST;
+  if (params != NULL) {
+    clock = checkinteger(WITHSPI, eval(car(params), env));
+    params = cdr(params);
+    if (params != NULL) {
+      bitorder = (checkinteger(WITHSPI, eval(car(params), env)) == 0) ? LSBFIRST : MSBFIRST;
+      params = cdr(params);
+      if (params != NULL) {
+        int modeval = checkinteger(WITHSPI, eval(car(params), env));
+        mode = (modeval == 3) ? SPI_MODE3 : (modeval == 2) ? SPI_MODE2 : (modeval == 1) ? SPI_MODE1 : SPI_MODE0;
+      }
+    }
+  }
   object *pair = cons(var, stream(SPISTREAM, pin));
   push(pair,env);
   SPI.begin();
-  params = cddr(params);
-  if (params != NULL) {
-    int d = integer(eval(first(params), env));
-    if (d<1 || d>7) error3(WITHSPI, PSTR("invalid divider"));
-    if (d == 7) divider = 3;
-    else if (d & 1) divider = (d>>1) + 4;
-    else divider = (d>>1) - 1;
-    params = cdr(params);
-    if (params != NULL) {
-      bitorder = (eval(first(params), env) == NULL);
-      params = cdr(params);
-      if (params != NULL) mode = integer(eval(first(params), env));
-    }
-  }
-  pinMode(pin, OUTPUT);
+  SPI.beginTransaction(SPISettings(((unsigned long)clock * 1000), bitorder, mode));
   digitalWrite(pin, LOW);
-  SPI.setBitOrder((BitOrder)bitorder);
-  SPI.setClockDivider(divider);
-  SPI.setDataMode(mode);
   object *forms = cdr(args);
   object *result = eval(tf_progn(forms,env), env);
   digitalWrite(pin, HIGH);
-  SPI.end();
+  SPI.endTransaction();
   return result;
 }
 
 object *sp_withsdcard (object *args, object *env) {
 #if defined(sdcardsupport)
   object *params = first(args);
+  if (params == NULL) error2(WITHSPCARD, nostream);
   object *var = first(params);
   object *filename = eval(second(params), env);
   params = cddr(params);
   SD.begin(SDCARD_SS_PIN);
   int mode = 0;
-  if (params != NULL && first(params) != NULL) mode = integer(first(params));
+  if (params != NULL && first(params) != NULL) mode = checkinteger(WITHSDCARD, first(params));
   int oflag = O_READ;
   if (mode == 1) oflag = O_RDWR | O_CREAT | O_APPEND; else if (mode == 2) oflag = O_RDWR | O_CREAT | O_TRUNC;
   if (mode >= 1) {
     SDpfile = SD.open(MakeFilename(filename), oflag);
-    if (!SDpfile) error(PSTR("Problem writing to SD card"));
+    if (!SDpfile) error2(WITHSPCARD, PSTR("problem writing to SD card"));
   } else {
     SDgfile = SD.open(MakeFilename(filename), oflag);
-    if (!SDgfile) error(PSTR("Problem reading from SD card"));
+    if (!SDgfile) error2(WITHSPCARD, PSTR("problem reading from SD card"));
   }
   object *pair = cons(var, stream(SDSTREAM, 1));
   push(pair,env);
@@ -1506,7 +1536,7 @@ object *sp_withsdcard (object *args, object *env) {
   return result;
 #else
   (void) args, (void) env;
-  error(PSTR("with-sd-card not supported"));
+  error2(WITHSDCARD, PSTR("not supported"));
   return nil;
 #endif
 }
@@ -1531,7 +1561,7 @@ object *tf_return (object *args, object *env) {
 }
 
 object *tf_if (object *args, object *env) {
-  if (args == NULL || cdr(args) == NULL) error3(IF, PSTR("missing argument(s)"));
+  if (args == NULL || cdr(args) == NULL) error2(IF, PSTR("missing argument(s)"));
   if (eval(first(args), env) != nil) return second(args);
   args = cddr(args);
   return (args != NULL) ? first(args) : nil;
@@ -1540,7 +1570,7 @@ object *tf_if (object *args, object *env) {
 object *tf_cond (object *args, object *env) {
   while (args != NULL) {
     object *clause = first(args);
-    if (!consp(clause)) error2(clause, PSTR("is an illegal 'cond' clause"));
+    if (!consp(clause)) error(COND, PSTR("illegal clause"), clause);
     object *test = eval(first(clause), env);
     object *forms = cdr(clause);
     if (test != nil) {
@@ -1552,13 +1582,13 @@ object *tf_cond (object *args, object *env) {
 }
 
 object *tf_when (object *args, object *env) {
-  if (args == NULL) error3(WHEN, PSTR("missing argument"));
+  if (args == NULL) error2(WHEN, noargument);
   if (eval(first(args), env) != nil) return tf_progn(cdr(args),env);
   else return nil;
 }
 
 object *tf_unless (object *args, object *env) {
-  if (args == NULL) error3(UNLESS, PSTR("missing argument"));
+  if (args == NULL) error2(UNLESS, noargument);
   if (eval(first(args), env) != nil) return nil;
   else return tf_progn(cdr(args),env);
 }
@@ -1568,7 +1598,7 @@ object *tf_case (object *args, object *env) {
   args = cdr(args);
   while (args != NULL) {
     object *clause = first(args);
-    if (!consp(clause)) error2(clause, PSTR("is an illegal 'case' clause"));
+    if (!consp(clause)) error(CASE, PSTR("illegal clause"), clause);
     object *key = car(clause);
     object *forms = cdr(clause);
     if (consp(key)) {
@@ -1720,8 +1750,8 @@ object *fn_cdddr (object *args, object *env) {
 object *fn_length (object *args, object *env) {
   (void) env;
   object *arg = first(args);
-  if (listp(arg)) return number(listlength(arg));
-  if (!stringp(arg)) error3(LENGTH, PSTR("argument is not a list or string"));
+  if (listp(arg)) return number(listlength(LENGTH, arg));
+  if (!stringp(arg)) error(LENGTH, PSTR("argument is not a list or string"), arg);
   return number(stringlength(arg));
 }
 
@@ -1735,7 +1765,7 @@ object *fn_reverse (object *args, object *env) {
   object *list = first(args);
   object *result = NULL;
   while (list != NULL) {
-    if (improperp(list)) error3(REVERSE, PSTR("argument is not a proper list"));
+    if (improperp(list)) error(REVERSE, notproper, list);
     push(first(list),result);
     list = cdr(list);
   }
@@ -1744,10 +1774,10 @@ object *fn_reverse (object *args, object *env) {
 
 object *fn_nth (object *args, object *env) {
   (void) env;
-  int n = integer(first(args));
+  int n = checkinteger(NTH, first(args));
   object *list = second(args);
   while (list != NULL) {
-    if (improperp(list)) error3(NTH, PSTR("argument is not a proper list"));
+    if (improperp(list)) error(NTH, notproper2, list);
     if (n == 0) return car(list);
     list = cdr(list);
     n--;
@@ -1759,7 +1789,6 @@ object *fn_assoc (object *args, object *env) {
   (void) env;
   object *key = first(args);
   object *list = second(args);
-  if (!listp(list)) error3(ASSOC, PSTR("second argument is not a list"));
   return assoc(key,list);
 }
 
@@ -1768,7 +1797,7 @@ object *fn_member (object *args, object *env) {
   object *item = first(args);
   object *list = second(args);
   while (list != NULL) {
-    if (improperp(list)) error3(MEMBER, PSTR("argument is not a proper list"));
+    if (improperp(list)) error(MEMBER, notproper, list);
     if (eq(item,car(list))) return list;
     list = cdr(list);
   }
@@ -1782,52 +1811,54 @@ object *fn_apply (object *args, object *env) {
     previous = last;
     last = cdr(last);
   }
-  if (!listp(car(last))) error3(APPLY, PSTR("last argument is not a list"));
-  cdr(previous) = car(last);
-  return apply(first(args), cdr(args), env);
+  object *arg = car(last);
+  if (!listp(arg)) error(APPLY, PSTR("last argument is not a list"), arg);
+  cdr(previous) = arg;
+  return apply(APPLY, first(args), cdr(args), env);
 }
 
 object *fn_funcall (object *args, object *env) {
-  return apply(first(args), cdr(args), env);
+  return apply(FUNCALL, first(args), cdr(args), env);
 }
 
 object *fn_append (object *args, object *env) {
   (void) env;
   object *head = NULL;
-  object *tail = NULL;
+  object *tail;
   while (args != NULL) {   
     object *list = first(args);
-    while ((unsigned int)list >= PAIR) {
+    if (!listp(list)) error(APPEND, notalist, list);
+    while (consp(list)) {
       object *obj = cons(car(list), cdr(list));
       if (head == NULL) head = obj;
       else cdr(tail) = obj;
       tail = obj;
       list = cdr(list);
+      if (cdr(args) != NULL && improperp(list)) error(APPEND, notproper, first(args));
     }
-    if (cdr(args) != NULL && list != NULL) error3(APPEND, PSTR("argument is not a proper list"));
     args = cdr(args);
   }
   return head;
 }
 
 object *fn_mapc (object *args, object *env) {
-  symbol_t name = MAPC;
   object *function = first(args);
   object *list1 = second(args);
   object *result = list1;
   object *list2 = cddr(args);
   if (list2 != NULL) {
     list2 = car(list2);
+    object *result2 = list2;
     while (list1 != NULL && list2 != NULL) {
-      if (improperp(list1)) error3(name, PSTR("second argument is not a proper list"));
-      if (improperp(list2)) error3(name, PSTR("third argument is not a proper list"));
-      apply(function, cons(car(list1),cons(car(list2),NULL)), env);
+      if (improperp(list1)) error(MAPC, notproper2, result);
+      if (improperp(list2)) error(MAPC, notproper3, result2);
+      apply(MAPC, function, cons(car(list1),cons(car(list2),NULL)), env);
       list1 = cdr(list1); list2 = cdr(list2);
     }
   } else {
     while (list1 != NULL) {
-      if (improperp(list1)) error3(name, PSTR("second argument is not a proper list"));
-      apply(function, cons(car(list1),NULL), env);
+      if (improperp(list1)) error(MAPC, notproper2, result);
+      apply(MAPC, function, cons(car(list1),NULL), env);
       list1 = cdr(list1);
     }
   }
@@ -1835,19 +1866,20 @@ object *fn_mapc (object *args, object *env) {
 }
 
 object *fn_mapcar (object *args, object *env) {
-  symbol_t name = MAPCAR;
   object *function = first(args);
   object *list1 = second(args);
+  object *result = list1;
   object *list2 = cddr(args);
   object *head = cons(NULL, NULL);
   push(head,GCStack);
   object *tail = head;
   if (list2 != NULL) {
     list2 = car(list2);
+    object *result2 = list2;
     while (list1 != NULL && list2 != NULL) {
-      if (improperp(list1)) error3(name, PSTR("second argument is not a proper list"));
-      if (improperp(list2)) error3(name, PSTR("third argument is not a proper list"));
-      object *result = apply(function, cons(car(list1), cons(car(list2),NULL)), env);
+      if (improperp(list1)) error(MAPCAR, notproper2, result);
+      if (improperp(list2)) error(MAPCAR, notproper3, result2);
+      object *result = apply(MAPCAR, function, cons(car(list1), cons(car(list2),NULL)), env);
       object *obj = cons(result,NULL);
       cdr(tail) = obj;
       tail = obj;
@@ -1855,8 +1887,8 @@ object *fn_mapcar (object *args, object *env) {
     }
   } else if (list1 != NULL) {
     while (list1 != NULL) {
-      if (improperp(list1)) error3(name, PSTR("second argument is not a proper list"));
-      object *result = apply(function, cons(car(list1),NULL), env);
+      if (improperp(list1)) error(MAPCAR, notproper2, result);
+      object *result = apply(MAPCAR, function, cons(car(list1),NULL), env);
       object *obj = cons(result,NULL);
       cdr(tail) = obj;
       tail = obj;
@@ -1868,37 +1900,38 @@ object *fn_mapcar (object *args, object *env) {
 }
 
 object *fn_mapcan (object *args, object *env) {
-  symbol_t name = MAPCAN;
   object *function = first(args);
   object *list1 = second(args);
+  object *result = list1;
   object *list2 = cddr(args);
   object *head = cons(NULL, NULL);
   push(head,GCStack);
   object *tail = head;
   if (list2 != NULL) {
     list2 = car(list2);
+    object *result2 = list2;
     while (list1 != NULL && list2 != NULL) {
-      if (improperp(list1)) error3(name, PSTR("second argument is not a proper list"));
-      if (improperp(list2)) error3(name, PSTR("third argument is not a proper list"));
-      object *result = apply(function, cons(car(list1), cons(car(list2),NULL)), env);
-      while (result != NULL && (unsigned int)result >= PAIR) {
+      if (improperp(list1)) error(MAPCAN, notproper2, result);
+      if (improperp(list2)) error(MAPCAN, notproper3, result2);
+      object *result = apply(MAPCAN, function, cons(car(list1), cons(car(list2),NULL)), env);
+      while ((unsigned int)result >= PAIR) {
         cdr(tail) = result;
         tail = result;
         result = cdr(result);
       }
-      if (cdr(list1) != NULL && cdr(list2) != NULL && result != NULL) error3(name, PSTR("result is not a proper list"));
+      if (cdr(list1) != NULL && cdr(list2) != NULL && result != NULL) error2(MAPCAN, PSTR("result is not a proper list"));
       list1 = cdr(list1); list2 = cdr(list2);
     }
   } else if (list1 != NULL) {
     while (list1 != NULL) {
-      if (improperp(list1)) error3(name, PSTR("second argument is not a proper list"));
-      object *result = apply(function, cons(car(list1),NULL), env);
-      while (result != NULL && (unsigned int)result >= PAIR) {
+      if (improperp(list1)) error(MAPCAN, notproper2, result);
+      object *result = apply(MAPCAN, function, cons(car(list1),NULL), env);
+      while ((unsigned int)result >= PAIR) {
         cdr(tail) = result;
         tail = result;
         result = cdr(result);
       }
-      if (cdr(list1) != NULL && result != NULL) error3(name, PSTR("result is not a proper list"));
+      if (cdr(list1) != NULL && result != NULL) error2(MAPCAN, PSTR("result is not a proper list"));
       list1 = cdr(list1);
     }
   }
@@ -1912,10 +1945,10 @@ object *fn_add (object *args, object *env) {
   (void) env;
   int result = 0;
   while (args != NULL) {
-    int temp = integer(car(args));
+    int temp = checkinteger(ADD, car(args));
     #if defined(checkoverflow)
-    if (temp < 1) { if (INT_MIN - temp > result) error3(ADD, PSTR("arithmetic overflow")); }
-    else { if (INT_MAX - temp < result) error3(ADD, PSTR("arithmetic overflow")); }
+    if (temp < 1) { if (INT_MIN - temp > result) error2(ADD, overflow); }
+    else { if (INT_MAX - temp < result) error2(ADD, overflow); }
     #endif
     result = result + temp;
     args = cdr(args);
@@ -1925,19 +1958,19 @@ object *fn_add (object *args, object *env) {
 
 object *fn_subtract (object *args, object *env) {
   (void) env;
-  int result = integer(car(args));
+  int result = checkinteger(SUBTRACT, car(args));
   args = cdr(args);
   if (args == NULL) {
     #if defined(checkoverflow)
-    if (result == INT_MIN) error3(SUBTRACT, PSTR("arithmetic overflow"));
+    if (result == INT_MIN) error2(SUBTRACT, overflow);
     #endif
     return number(-result);
   }
   while (args != NULL) {
-    int temp = integer(car(args));
+    int temp = checkinteger(SUBTRACT, car(args));
     #if defined(checkoverflow)
-    if (temp < 1) { if (INT_MAX + temp < result) error3(SUBTRACT, PSTR("arithmetic overflow")); }
-    else { if (INT_MIN + temp > result) error3(SUBTRACT, PSTR("arithmetic overflow")); }
+    if (temp < 1) { if (INT_MAX + temp < result) error2(SUBTRACT, overflow); }
+    else { if (INT_MIN + temp > result) error2(SUBTRACT, overflow); }
     #endif
     result = result - temp;
     args = cdr(args);
@@ -1950,11 +1983,11 @@ object *fn_multiply (object *args, object *env) {
   int result = 1;
   while (args != NULL){
     #if defined(checkoverflow)
-    signed long temp = (signed long) result * integer(car(args));
-    if ((temp > INT_MAX) || (temp < INT_MIN)) error3(MULTIPLY, PSTR("arithmetic overflow"));
+    signed long temp = (signed long) result * checkinteger(MULTIPLY, car(args));
+    if ((temp > INT_MAX) || (temp < INT_MIN)) error2(MULTIPLY, overflow);
     result = temp;
     #else
-    result = result * integer(car(args));
+    result = result * checkinteger(MULTIPLY, car(args));
     #endif
     args = cdr(args);
   }
@@ -1963,13 +1996,13 @@ object *fn_multiply (object *args, object *env) {
 
 object *fn_divide (object *args, object *env) {
   (void) env;
-  int result = integer(first(args));
+  int result = checkinteger(DIVIDE, first(args));
   args = cdr(args);
   while (args != NULL) {
-    int arg = integer(car(args));
-    if (arg == 0) error(PSTR("Division by zero"));
+    int arg = checkinteger(DIVIDE, car(args));
+    if (arg == 0) error2(DIVIDE, PSTR("division by zero"));
     #if defined(checkoverflow)
-    if ((result == INT_MIN) && (arg == -1)) error3(DIVIDE, PSTR("arithmetic overflow"));
+    if ((result == INT_MIN) && (arg == -1)) error2(DIVIDE, overflow);
     #endif
     result = result / arg;
     args = cdr(args);
@@ -1979,9 +2012,9 @@ object *fn_divide (object *args, object *env) {
 
 object *fn_mod (object *args, object *env) {
   (void) env;
-  int arg1 = integer(first(args));
-  int arg2 = integer(second(args));
-  if (arg2 == 0) error(PSTR("Division by zero"));
+  int arg1 = checkinteger(MOD, first(args));
+  int arg2 = checkinteger(MOD, second(args));
+  if (arg2 == 0) error2(MOD, PSTR("division by zero"));
   int r = arg1 % arg2;
   if ((arg1<0) != (arg2<0)) r = r + arg2;
   return number(r);
@@ -1989,43 +2022,43 @@ object *fn_mod (object *args, object *env) {
 
 object *fn_oneplus (object *args, object *env) {
   (void) env;
-  int result = integer(first(args));
+  int result = checkinteger(ONEPLUS, first(args));
   #if defined(checkoverflow)
-  if (result == INT_MAX) error3(ONEPLUS, PSTR("arithmetic overflow"));
+  if (result == INT_MAX) error2(ONEPLUS, overflow);
   #endif
   return number(result + 1);
 }
 
 object *fn_oneminus (object *args, object *env) {
   (void) env;
-  int result = integer(first(args));
+  int result = checkinteger(ONEMINUS, first(args));
   #if defined(checkoverflow)
-  if (result == INT_MIN) error3(ONEMINUS, PSTR("arithmetic overflow"));
+  if (result == INT_MIN) error2(ONEMINUS, overflow);
   #endif
   return number(result - 1);
 }
 
 object *fn_abs (object *args, object *env) {
   (void) env;
-  int result = integer(first(args));
+  int result = checkinteger(ABS, first(args));
   #if defined(checkoverflow)
-  if (result == INT_MIN) error3(ABS, PSTR("arithmetic overflow"));
+  if (result == INT_MIN) error2(ABS, overflow);
   #endif
   return number(abs(result));
 }
 
 object *fn_random (object *args, object *env) {
   (void) env;
-  int arg = integer(first(args));
+  int arg = checkinteger(RANDOM, first(args));
   return number(random(arg));
 }
 
 object *fn_maxfn (object *args, object *env) {
   (void) env;
-  int result = integer(first(args));
+  int result = checkinteger(MAXFN, first(args));
   args = cdr(args);
   while (args != NULL) {
-    int next = integer(car(args));
+    int next = checkinteger(MAXFN, car(args));
     if (next > result) result = next;
     args = cdr(args);
   }
@@ -2034,10 +2067,10 @@ object *fn_maxfn (object *args, object *env) {
 
 object *fn_minfn (object *args, object *env) {
   (void) env;
-  int result = integer(first(args));
+  int result = checkinteger(MINFN, first(args));
   args = cdr(args);
   while (args != NULL) {
-    int next = integer(car(args));
+    int next = checkinteger(MINFN, car(args));
     if (next < result) result = next;
     args = cdr(args);
   }
@@ -2050,10 +2083,10 @@ object *fn_noteq (object *args, object *env) {
   (void) env;
   while (args != NULL) {   
     object *nargs = args;
-    int arg1 = integer(first(nargs));
+    int arg1 = checkinteger(NOTEQ, first(nargs));
     nargs = cdr(nargs);
     while (nargs != NULL) {
-       int arg2 = integer(first(nargs));
+       int arg2 = checkinteger(NOTEQ, first(nargs));
        if (arg1 == arg2) return nil;
        nargs = cdr(nargs);
     }
@@ -2064,10 +2097,10 @@ object *fn_noteq (object *args, object *env) {
 
 object *fn_numeq (object *args, object *env) {
   (void) env;
-  int arg1 = integer(first(args));
+  int arg1 = checkinteger(NUMEQ, first(args));
   args = cdr(args);
   while (args != NULL) {
-    int arg2 = integer(first(args));
+    int arg2 = checkinteger(NUMEQ, first(args));
     if (!(arg1 == arg2)) return nil;
     arg1 = arg2;
     args = cdr(args);
@@ -2077,10 +2110,10 @@ object *fn_numeq (object *args, object *env) {
 
 object *fn_less (object *args, object *env) {
   (void) env;
-  int arg1 = integer(first(args));
+  int arg1 = checkinteger(LESS, first(args));
   args = cdr(args);
   while (args != NULL) {
-    int arg2 = integer(first(args));
+    int arg2 = checkinteger(LESS, first(args));
     if (!(arg1 < arg2)) return nil;
     arg1 = arg2;
     args = cdr(args);
@@ -2090,10 +2123,10 @@ object *fn_less (object *args, object *env) {
 
 object *fn_lesseq (object *args, object *env) {
   (void) env;
-  int arg1 = integer(first(args));
+  int arg1 = checkinteger(LESSEQ, first(args));
   args = cdr(args);
   while (args != NULL) {
-    int arg2 = integer(first(args));
+    int arg2 = checkinteger(LESSEQ, first(args));
     if (!(arg1 <= arg2)) return nil;
     arg1 = arg2;
     args = cdr(args);
@@ -2103,10 +2136,10 @@ object *fn_lesseq (object *args, object *env) {
 
 object *fn_greater (object *args, object *env) {
   (void) env;
-  int arg1 = integer(first(args));
+  int arg1 = checkinteger(GREATER, first(args));
   args = cdr(args);
   while (args != NULL) {
-    int arg2 = integer(first(args));
+    int arg2 = checkinteger(GREATER, first(args));
     if (!(arg1 > arg2)) return nil;
     arg1 = arg2;
     args = cdr(args);
@@ -2116,10 +2149,10 @@ object *fn_greater (object *args, object *env) {
 
 object *fn_greatereq (object *args, object *env) {
   (void) env;
-  int arg1 = integer(first(args));
+  int arg1 = checkinteger(GREATEREQ, first(args));
   args = cdr(args);
   while (args != NULL) {
-    int arg2 = integer(first(args));
+    int arg2 = checkinteger(GREATEREQ, first(args));
     if (!(arg1 >= arg2)) return nil;
     arg1 = arg2;
     args = cdr(args);
@@ -2129,32 +2162,34 @@ object *fn_greatereq (object *args, object *env) {
 
 object *fn_plusp (object *args, object *env) {
   (void) env;
-  int arg = integer(first(args));
+  int arg = checkinteger(PLUSP, first(args));
   if (arg > 0) return tee;
   else return nil;
 }
 
 object *fn_minusp (object *args, object *env) {
   (void) env;
-  int arg = integer(first(args));
+  int arg = checkinteger(MINUSP, first(args));
   if (arg < 0) return tee;
   else return nil;
 }
 
 object *fn_zerop (object *args, object *env) {
   (void) env;
-  int arg = integer(first(args));
+  int arg = checkinteger(ZEROP, first(args));
   return (arg == 0) ? tee : nil;
 }
 
 object *fn_oddp (object *args, object *env) {
   (void) env;
-  return ((integer(first(args)) & 1) == 1) ? tee : nil;
+  int arg = checkinteger(ODDP, first(args));
+  return ((arg & 1) == 1) ? tee : nil;
 }
 
 object *fn_evenp (object *args, object *env) {
   (void) env;
-  return ((integer(first(args)) & 1) == 0) ? tee : nil;
+  int arg = checkinteger(EVENP, first(args));
+  return ((arg & 1) == 0) ? tee : nil;
 }
 
 // Number functions
@@ -2174,20 +2209,20 @@ object *fn_numberp (object *args, object *env) {
 object *fn_char (object *args, object *env) {
   (void) env;
   object *arg = first(args);
-  if (!stringp(arg)) error2(arg, PSTR("is not a string"));
-  char c = nthchar(arg, integer(second(args)));
-  if (c == 0) error3(CHAR, PSTR("index out of range"));
+  if (!stringp(arg)) error(CHAR, notastring, arg);
+  char c = nthchar(arg, checkinteger(CHAR, second(args)));
+  if (c == 0) error2(CHAR, PSTR("index out of range"));
   return character(c);
 }
 
 object *fn_charcode (object *args, object *env) {
   (void) env;
-  return number(fromchar(first(args)));
+  return number(checkchar(CHARCODE, first(args)));
 }
 
 object *fn_codechar (object *args, object *env) {
   (void) env;
-  return character(integer(first(args)));
+  return character(checkinteger(CODECHAR, first(args)));
 }
 
 object *fn_characterp (object *args, object *env) {
@@ -2202,10 +2237,9 @@ object *fn_stringp (object *args, object *env) {
   return stringp(first(args)) ? tee : nil;
 }
 
-bool stringcompare (object *args, bool lt, bool gt, bool eq, symbol_t name) {
-  object *arg1 = first(args);
-  object *arg2 = second(args);
-  if (!stringp(arg1) || !stringp(arg2)) error3(name, PSTR("argument is not a string"));
+bool stringcompare (symbol_t name, object *args, bool lt, bool gt, bool eq) {
+  object *arg1 = first(args); if (!stringp(arg1)) error(name, notastring, arg1);
+  object *arg2 = second(args); if (!stringp(arg2)) error(name, notastring, arg2); 
   arg1 = cdr(arg1);
   arg2 = cdr(arg2);
   while ((arg1 != NULL) || (arg2 != NULL)) {
@@ -2221,17 +2255,17 @@ bool stringcompare (object *args, bool lt, bool gt, bool eq, symbol_t name) {
 
 object *fn_stringeq (object *args, object *env) {
   (void) env;
-  return stringcompare(args, false, false, true, STRINGEQ) ? tee : nil;
+  return stringcompare(STRINGEQ, args, false, false, true) ? tee : nil;
 }
 
 object *fn_stringless (object *args, object *env) {
   (void) env;
-  return stringcompare(args, true, false, false, STRINGLESS) ? tee : nil;
+  return stringcompare(STRINGLESS, args, true, false, false) ? tee : nil;
 }
 
 object *fn_stringgreater (object *args, object *env) {
   (void) env;
-  return stringcompare(args, false, true, false, STRINGGREATER) ? tee : nil;
+  return stringcompare(STRINGGREATER, args, false, true, false) ? tee : nil;
 }
 
 object *fn_sort (object *args, object *env) {
@@ -2239,14 +2273,14 @@ object *fn_sort (object *args, object *env) {
   object *list = cons(nil,first(args));
   push(list,GCStack);
   object *predicate = second(args);
-  object *compare = cons(NULL,cons(NULL,NULL));
+  object *compare = cons(NULL, cons(NULL, NULL));
   object *ptr = cdr(list);
   while (cdr(ptr) != NULL) {
     object *go = list;
     while (go != ptr) {
       car(compare) = car(cdr(ptr));
       car(cdr(compare)) = car(cdr(go));
-      if (apply(predicate, compare, env)) break;
+      if (apply(SORT, predicate, compare, env)) break;
       go = cdr(go);
     }
     if (go != ptr) {
@@ -2271,10 +2305,10 @@ object *fn_stringfn (object *args, object *env) {
     object *cell = myalloc();
     cell->car = NULL;
     uint8_t shift = (sizeof(int)-1)*8;
-    cell->integer = fromchar(arg)<<shift;
+    cell->integer = (arg->integer)<<shift;
     obj->cdr = cell;
   } else if (type == SYMBOL) {
-    char *s = name(arg);
+    char *s = symbolname(arg->name);
     char ch = *s++;
     object *head = NULL;
     int chars = 0;
@@ -2284,7 +2318,7 @@ object *fn_stringfn (object *args, object *env) {
       ch = *s++;
     }
     obj->cdr = head;
-  } else error(PSTR("Cannot convert to string"));
+  } else error(STRINGFN, PSTR("can't convert to string"), arg);
   return obj;
 }
 
@@ -2292,7 +2326,7 @@ object *fn_concatenate (object *args, object *env) {
   (void) env;
   object *arg = first(args);
   symbol_t name = arg->name;
-  if (name != STRINGFN) error3(CONCATENATE, PSTR("only supports strings"));
+  if (name != STRINGFN) error2(CONCATENATE, PSTR("only supports strings"));
   args = cdr(args);
   object *result = myalloc();
   result->type = STRING;
@@ -2300,7 +2334,7 @@ object *fn_concatenate (object *args, object *env) {
   int chars = 0;
   while (args != NULL) {
     object *obj = first(args);
-    if (obj->type != STRING) error2(obj, PSTR("not a string"));
+    if (obj->type != STRING) error(CONCATENATE, notastring, obj);
     obj = cdr(obj);
     while (obj != NULL) {
       int quad = obj->integer;
@@ -2320,18 +2354,18 @@ object *fn_concatenate (object *args, object *env) {
 object *fn_subseq (object *args, object *env) {
   (void) env;
   object *arg = first(args);
-  if (!stringp(arg)) error3(SUBSEQ, PSTR("first argument is not a string"));
-  int start = integer(second(args));
+  if (!stringp(arg)) error(SUBSEQ, notastring, arg);
+  int start = checkinteger(SUBSEQ, second(args));
   int end;
   args = cddr(args);
-  if (args != NULL) end = integer(car(args)); else end = stringlength(arg);
+  if (args != NULL) end = checkinteger(SUBSEQ, car(args)); else end = stringlength(arg);
   object *result = myalloc();
   result->type = STRING;
   object *head = NULL;
   int chars = 0;
   for (int i=start; i<end; i++) {
     char ch = nthchar(arg, i);
-    if (ch == 0) error3(SUBSEQ, PSTR("index out of range"));
+    if (ch == 0) error2(SUBSEQ, PSTR("index out of range"));
     buildstring(ch, &chars, &head);
   }
   result->cdr = head;
@@ -2351,7 +2385,7 @@ int gstr () {
 object *fn_readfromstring (object *args, object *env) {   
   (void) env;
   object *arg = first(args);
-  if (!stringp(arg)) error3(READFROMSTRING, PSTR("argument is not a string"));
+  if (!stringp(arg)) error(READFROMSTRING, notastring, arg);
   GlobalString = arg;
   GlobalStringIndex = 0;
   return read(gstr);
@@ -2394,7 +2428,7 @@ object *fn_logand (object *args, object *env) {
   (void) env;
   int result = -1;
   while (args != NULL) {
-    result = result & integer(first(args));
+    result = result & checkinteger(LOGAND, first(args));
     args = cdr(args);
   }
   return number(result);
@@ -2404,7 +2438,7 @@ object *fn_logior (object *args, object *env) {
   (void) env;
   int result = 0;
   while (args != NULL) {
-    result = result | integer(first(args));
+    result = result | checkinteger(LOGIOR, first(args));
     args = cdr(args);
   }
   return number(result);
@@ -2414,7 +2448,7 @@ object *fn_logxor (object *args, object *env) {
   (void) env;
   int result = 0;
   while (args != NULL) {
-    result = result ^ integer(first(args));
+    result = result ^ checkinteger(LOGXOR, first(args));
     args = cdr(args);
   }
   return number(result);
@@ -2422,14 +2456,14 @@ object *fn_logxor (object *args, object *env) {
 
 object *fn_lognot (object *args, object *env) {
   (void) env;
-  int result = integer(car(args));
+  int result = checkinteger(LOGNOT, car(args));
   return number(~result);
 }
 
 object *fn_ash (object *args, object *env) {
   (void) env;
-  int value = integer(first(args));
-  int count = integer(second(args));
+  int value = checkinteger(ASH, first(args));
+  int count = checkinteger(ASH, second(args));
   if (count >= 0)
     return number(value << count);
   else
@@ -2438,8 +2472,8 @@ object *fn_ash (object *args, object *env) {
 
 object *fn_logbitp (object *args, object *env) {
   (void) env;
-  int index = integer(first(args));
-  int value = integer(second(args));
+  int index = checkinteger(LOGBITP, first(args));
+  int value = checkinteger(LOGBITP, second(args));
   return (bitRead(value, index) == 1) ? tee : nil;
 }
 
@@ -2533,7 +2567,7 @@ object *fn_readline (object *args, object *env) {
 
 object *fn_writebyte (object *args, object *env) {
   (void) env;
-  int value = integer(first(args));
+  int value = checkinteger(WRITEBYTE, first(args));
   pfun_t pfun = pstreamfun(cdr(args));
   (pfun)(value);
   return nil;
@@ -2570,11 +2604,11 @@ object *fn_restarti2c (object *args, object *env) {
   I2CCount = 0;
   if (args != NULL) {
     object *rw = first(args);
-    if (integerp(rw)) I2CCount = integer(rw);
+    if (integerp(rw)) I2CCount = checkinteger(RESTARTI2C, rw);
     read = (rw != NULL);
   }
   int address = stream & 0xFF;
-  if (stream>>8 != I2CSTREAM) error3(RESTARTI2C, PSTR("not i2c"));
+  if (stream>>8 != I2CSTREAM) error2(RESTARTI2C, PSTR("not an i2c stream"));
   return I2Crestart(address, read) ? tee : nil;
 }
 
@@ -2617,11 +2651,11 @@ object *fn_cls (object *args, object *env) {
 
 object *fn_pinmode (object *args, object *env) {
   (void) env;
-  int pin = integer(first(args));
+  int pin = checkinteger(PINMODE, first(args));
   int pm = INPUT;
   object *mode = second(args);
   if (integerp(mode)) {
-    int nmode = integer(mode);
+    int nmode = checkinteger(PINMODE, mode);
     if (nmode == 1) pm = OUTPUT; else if (nmode == 2) pm = INPUT_PULLUP;
     #if defined(INPUT_PULLDOWN)
     else if (nmode == 4) pm = INPUT_PULLDOWN;
@@ -2633,13 +2667,13 @@ object *fn_pinmode (object *args, object *env) {
 
 object *fn_digitalread (object *args, object *env) {
   (void) env;
-  int pin = integer(first(args));
+  int pin = checkinteger(DIGITALREAD, first(args));
   if (digitalRead(pin) != 0) return tee; else return nil;
 }
 
 object *fn_digitalwrite (object *args, object *env) {
   (void) env;
-  int pin = integer(first(args));
+  int pin = checkinteger(DIGITALWRITE, first(args));
   object *mode = second(args);
   if (integerp(mode)) digitalWrite(pin, mode->integer);
   else digitalWrite(pin, (mode != nil));
@@ -2648,24 +2682,24 @@ object *fn_digitalwrite (object *args, object *env) {
 
 object *fn_analogread (object *args, object *env) {
   (void) env;
-  int pin = integer(first(args));
+  int pin = checkinteger(ANALOGREAD, first(args));
   checkanalogread(pin);
   return number(analogRead(pin));
 }
  
 object *fn_analogwrite (object *args, object *env) {
   (void) env;
-  int pin = integer(first(args));
+  int pin = checkinteger(ANALOGWRITE, first(args));
   checkanalogwrite(pin);
   object *value = second(args);
-  analogWrite(pin, integer(value));
+  analogWrite(pin, checkinteger(ANALOGWRITE, value));
   return value;
 }
 
 object *fn_delay (object *args, object *env) {
   (void) env;
   object *arg1 = first(args);
-  delay(integer(arg1));
+  delay(checkinteger(DELAY, arg1));
   return arg1;
 }
 
@@ -2677,7 +2711,7 @@ object *fn_millis (object *args, object *env) {
 object *fn_sleep (object *args, object *env) {
   (void) env;
   object *arg1 = first(args);
-  sleep(integer(arg1));
+  sleep(checkinteger(SLEEP, arg1));
   return arg1;
 }
 
@@ -2685,11 +2719,11 @@ object *fn_note (object *args, object *env) {
   (void) env;
   static int pin = 255;
   if (args != NULL) {
-    pin = integer(first(args));
+    pin = checkinteger(NOTE, first(args));
     int note = 0;
-    if (cddr(args) != NULL) note = integer(second(args));
+    if (cddr(args) != NULL) note = checkinteger(NOTE, second(args));
     int octave = 0;
-    if (cddr(args) != NULL) octave = integer(third(args));
+    if (cddr(args) != NULL) octave = checkinteger(NOTE, third(args));
     playnote(pin, note, octave);
   } else nonote(pin);
   return nil;
@@ -2761,7 +2795,7 @@ int subwidthlist (object *form, int w) {
 
 void superprint (object *form, int lm, pfun_t pfun) {
   if (atom(form)) {
-    if (symbolp(form) && form->name == NOTHING) pstring(name(form), pfun);
+    if (symbolp(form) && form->name == NOTHING) pstring(symbolname(form->name), pfun);
     else printobject(form, pfun);
   }
   else if (quoted(form)) { pfun('\''); superprint(car(cdr(form)), lm + 1, pfun); }
@@ -2811,11 +2845,14 @@ object *fn_pprintall (object *args, object *env) {
     object *pair = first(globals);
     object *var = car(pair);
     object *val = cdr(pair);
+    pln(pserial);
     if (consp(val) && symbolp(car(val)) && car(val)->name == LAMBDA) {
-      pln(pserial);
       superprint(cons(symbol(DEFUN), cons(var, cdr(val))), 0, pserial);
-      pln(pserial);
+    } else {
+      superprint(cons(symbol(DEFVAR),cons(var,cons(cons(symbol(QUOTE),cons(val,NULL))
+      ,NULL))), 0, pserial);
     }
+    pln(pserial);
     globals = cdr(globals);
   }
   return symbol(NOTHING);
@@ -2826,7 +2863,7 @@ object *fn_pprintall (object *args, object *env) {
 object *fn_require (object *args, object *env) {
   object *arg = first(args);
   object *globals = GlobalEnv;
-  if (!symbolp(arg)) error3(REQUIRE, PSTR("argument is not a symbol"));
+  if (!symbolp(arg)) error(REQUIRE, PSTR("argument is not a symbol"), arg);
   while (globals != NULL) {
     object *pair = first(globals);
     object *var = car(pair);
@@ -2854,7 +2891,7 @@ object *fn_listlibrary (object *args, object *env) {
   while (line != NULL) {
     int fname = first(line)->name;
     if (fname == DEFUN || fname == DEFVAR) {
-      pstring(name(second(line)), pserial); pserial(' ');
+      pstring(symbolname(second(line)->name), pserial); pserial(' ');
     }
     line = read(glibrary);
   }
@@ -3208,10 +3245,10 @@ int longsymbol (char *buffer) {
   if (p == buffer) {
     // Add to symbol table?
     char *newtop = SymbolTop + strlen(p) + 1;
-    if (SYMBOLTABLESIZE - (newtop - SymbolTable) < BUFFERSIZE) error(PSTR("No room for long symbols"));
+    if (SYMBOLTABLESIZE - (newtop - SymbolTable) < BUFFERSIZE) error2(0, PSTR("no room for long symbols"));
     SymbolTop = newtop;
   }
-  if (i > 1535) error(PSTR("Too many long symbols"));
+  if (i > 1535) error2(0, PSTR("Too many long symbols"));
   return i + 64000; // First number unused by radix40
 }
 
@@ -3250,7 +3287,7 @@ void deletesymbol (symbol_t name) {
 }
 
 void testescape () {
-  if (Serial.read() == '~') error(PSTR("Escape!"));
+  if (Serial.read() == '~') error2(0, PSTR("escape!"));
 }
 
 // Main evaluator
@@ -3262,13 +3299,13 @@ object *eval (object *form, object *env) {
   EVAL:
   yield(); // Needed on ESP8266 to avoid Soft WDT Reset
   // Enough space?
-  if (End != 0xA5) error(PSTR("Stack overflow"));
+  if (End != 0xA5) error2(0, PSTR("Stack overflow"));
   if (Freespace <= WORKSPACESIZE>>4) gc(form, env);
   // Escape
-  if (tstflag(ESCAPE)) { clrflag(ESCAPE); error(PSTR("Escape!"));}
+  if (tstflag(ESCAPE)) { clrflag(ESCAPE); error2(0, PSTR("Escape!"));}
   #if defined (serialmonitor)
   testescape();
-  #endif 
+  #endif
   
   if (form == NULL) return nil;
 
@@ -3282,15 +3319,15 @@ object *eval (object *form, object *env) {
     pair = value(name, GlobalEnv);
     if (pair != NULL) return cdr(pair);
     else if (name <= ENDFUNCTIONS) return form;
-    error2(form, PSTR("undefined"));
+    error(0, PSTR("undefined"), form);
   }
   
   // It's a list
   object *function = car(form);
   object *args = cdr(form);
 
-  if (function == NULL) error3(NIL, PSTR("is an illegal function"));
-  if (!listp(args)) error(PSTR("Can't evaluate a dotted pair"));
+  if (function == NULL) error2(0, PSTR("'nil' illegal function"));
+  if (!listp(args)) error(0, PSTR("can't evaluate a dotted pair"), args);
 
   // List starts with a symbol?
   if (symbolp(function)) {
@@ -3329,7 +3366,7 @@ object *eval (object *form, object *env) {
       return cons(symbol(CLOSURE), cons(envcopy,args));
     }
     
-    if (name < SPECIAL_FORMS) error2(function, PSTR("can't be used as a function"));
+    if (name < SPECIAL_FORMS) error2((int)function, PSTR("can't be used as a function"));
 
     if ((name > SPECIAL_FORMS) && (name < TAIL_FORMS)) {
       return ((fn_ptr_type)lookupfn(name))(args, env);
@@ -3364,16 +3401,16 @@ object *eval (object *form, object *env) {
  
   if (symbolp(function)) {
     symbol_t name = function->name;
-    if (name >= ENDFUNCTIONS) error2(fname, PSTR("is not valid here"));
-    if (nargs<lookupmin(name)) error2(fname, PSTR("has too few arguments"));
-    if (nargs>lookupmax(name)) error2(fname, PSTR("has too many arguments"));
+    if (name >= ENDFUNCTIONS) error(0, PSTR("not valid here"), fname);
+    if (nargs<lookupmin(name)) error2(name, PSTR("has too few arguments"));
+    if (nargs>lookupmax(name)) error2(name, PSTR("has too many arguments"));
     object *result = ((fn_ptr_type)lookupfn(name))(args, env);
     pop(GCStack);
     return result;
   }
       
   if (listp(function) && issymbol(car(function), LAMBDA)) {
-    form = closure(TCstart, fname, NULL, cdr(function), args, &env);
+    form = closure(TCstart, fname->name, NULL, cdr(function), args, &env);
     pop(GCStack);
     int trace = tracing(fname->name);
     if (trace) {
@@ -3392,13 +3429,13 @@ object *eval (object *form, object *env) {
 
   if (listp(function) && issymbol(car(function), CLOSURE)) {
     function = cdr(function);
-    form = closure(TCstart, fname, car(function), cdr(function), args, &env);
+    form = closure(TCstart, fname->name, car(function), cdr(function), args, &env);
     pop(GCStack);
     TC = 1;
     goto EVAL;
   } 
   
-  error2(fname, PSTR("is an illegal function")); return nil;
+  error2((int)fname, PSTR("is an illegal function")); return nil;
 }
 
 // Print functions
@@ -3497,15 +3534,11 @@ void printobject (object *form, pfun_t pfun){
       printobject(form, pfun);
     }
     pfun(')');
-  } else if (integerp(form)) {
-    pint(integer(form), pfun);
-  } else if (symbolp(form)) {
-    if (form->name != NOTHING) pstring(name(form), pfun);
-  } else if (characterp(form)) {
-    pcharacter(form->integer, pfun);
-  } else if (stringp(form)) {
-    printstring(form, pfun);
-  } else if (streamp(form)) {
+  } else if (integerp(form)) pint(form->integer, pfun);
+  else if (symbolp(form)) { if (form->name != NOTHING) pstring(symbolname(form->name), pfun); }
+  else if (characterp(form)) pcharacter(form->integer, pfun);
+  else if (stringp(form)) printstring(form, pfun);
+  else if (streamp(form)) {
     pfstring(PSTR("<"), pfun);
     if ((form->integer)>>8 == SPISTREAM) pfstring(PSTR("spi"), pfun);
     else if ((form->integer)>>8 == I2CSTREAM) pfstring(PSTR("i2c"), pfun);
@@ -3515,7 +3548,7 @@ void printobject (object *form, pfun_t pfun){
     pint(form->integer & 0xFF, pfun);
     pfun('>');
   } else
-    error(PSTR("Error in print."));
+    error2(0, PSTR("Error in print"));
 }
 
 // Read functions
@@ -3588,7 +3621,7 @@ object *nextitem (gfun_t gfun) {
     else if (ch == 'O') base = 8;
     else if (ch == 'X') base = 16;
     else if (ch == 0x07) return (object *)QUO;
-    else error(PSTR("Illegal character after #"));
+    else error2(0, PSTR("illegal character after #"));
     ch = gfun();
   }
   int isnumber = (digitvalue(ch)<base);
@@ -3607,7 +3640,7 @@ object *nextitem (gfun_t gfun) {
 
   if (isnumber) {
     if (base == 10 && result > ((unsigned int)INT_MAX+(1-sign)/2)) 
-      error(PSTR("Number out of range"));
+      error2(0, PSTR("Number out of range"));
     return number(result*sign);
   } else if (base == 0) {
     if (index == 1) return character(buffer[0]);
@@ -3616,7 +3649,7 @@ object *nextitem (gfun_t gfun) {
       if (strcasecmp_P(buffer, p) == 0) return character(c);
       p = p + strlen_P(p) + 1; c++;
     }
-    error(PSTR("Unknown character"));
+    error2(0, PSTR("Unknown character"));
   }
   
   int x = builtin(buffer);
@@ -3638,7 +3671,7 @@ object *readrest (gfun_t gfun) {
       item = cons(symbol(QUOTE), cons(read(gfun), NULL));
     } else if (item == (object *)DOT) {
       tail->cdr = read(gfun);
-      if (readrest(gfun) != NULL) error(PSTR("Malformed list"));
+      if (readrest(gfun) != NULL) error2(0, PSTR("malformed list"));
       return head;
     } else {
       object *cell = cons(item, NULL);
@@ -3653,7 +3686,7 @@ object *readrest (gfun_t gfun) {
 
 object *read (gfun_t gfun) {
   object *item = nextitem(gfun);
-  if (item == (object *)KET) error(PSTR("Incomplete list"));
+  if (item == (object *)KET) error2(0, PSTR("incomplete list"));
   if (item == (object *)BRA) return readrest(gfun);
   if (item == (object *)DOT) return read(gfun);
   if (item == (object *)QUO) return cons(symbol(QUOTE), cons(read(gfun), NULL)); 
@@ -3674,7 +3707,7 @@ void setup () {
   initworkspace();
   initenv();
   initsleep();
-  pfstring(PSTR("uLisp 2.7 "), pserial); pln(pserial);
+  pfstring(PSTR("uLisp 2.8 "), pserial); pln(pserial);
 }
 
 // Read/Evaluate/Print loop
@@ -3693,7 +3726,7 @@ void repl (object *env) {
     pfstring(PSTR("> "), pserial);
     object *line = read(gserial);
     if (BreakLevel && line == nil) { pln(pserial); return; }
-    if (line == (object *)KET) error(PSTR("Unmatched right bracket"));
+    if (line == (object *)KET) error2(0, PSTR("unmatched right bracket"));
     push(line, GCStack);
     pfl(pserial);
     line = eval(line, env);
