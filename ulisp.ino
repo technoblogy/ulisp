@@ -3707,7 +3707,7 @@ void setup () {
   initworkspace();
   initenv();
   initsleep();
-  pfstring(PSTR("uLisp 2.8 "), pserial); pln(pserial);
+  pfstring(PSTR("uLisp 2.8a "), pserial); pln(pserial);
 }
 
 // Read/Evaluate/Print loop
