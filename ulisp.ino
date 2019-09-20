@@ -1,5 +1,5 @@
-/* uLisp AVR Version 2.8a - www.ulisp.com
-   David Johnson-Davies - www.technoblogy.com - 6th August 2019
+/* uLisp AVR Version 2.9 - www.ulisp.com
+   David Johnson-Davies - www.technoblogy.com - 20th September 2019
 
    Licensed under the MIT license: https://opensource.org/licenses/MIT
 */
@@ -24,12 +24,18 @@ const char LispLibrary[] PROGMEM = "";
 #include <setjmp.h>
 #include <SPI.h>
 #include <limits.h>
+#include <EEPROM.h>
 
 #if defined(sdcardsupport)
 #include <SD.h>
 #define SDSIZE 172
 #else
 #define SDSIZE 0
+#endif
+
+#if defined(__AVR_ATmega4809__) || defined(__AVR_ATtiny3216__)
+#define PROGMEM
+#define PSTR(s) (s)
 #endif
 
 // C Macros
@@ -70,8 +76,8 @@ enum token { UNUSED, BRA, KET, QUO, DOT };
 enum stream { SERIALSTREAM, I2CSTREAM, SPISTREAM, SDSTREAM };
 
 enum function { NIL, TEE, NOTHING, OPTIONAL, AMPREST, LAMBDA, LET, LETSTAR, CLOSURE, SPECIAL_FORMS, QUOTE,
-DEFUN, DEFVAR, SETQ, LOOP, PUSH, POP, INCF, DECF, SETF, DOLIST, DOTIMES, TRACE, UNTRACE, FORMILLIS,
-WITHSERIAL, WITHI2C, WITHSPI, WITHSDCARD, TAIL_FORMS, PROGN, RETURN, IF, COND, WHEN, UNLESS, CASE, AND,
+DEFUN, DEFVAR, SETQ, LOOP, RETURN, PUSH, POP, INCF, DECF, SETF, DOLIST, DOTIMES, TRACE, UNTRACE,
+FORMILLIS, WITHSERIAL, WITHI2C, WITHSPI, WITHSDCARD, TAIL_FORMS, PROGN, IF, COND, WHEN, UNLESS, CASE, AND,
 OR, FUNCTIONS, NOT, NULLFN, CONS, ATOM, LISTP, CONSP, SYMBOLP, STREAMP, EQ, CAR, FIRST, CDR, REST, CAAR,
 CADR, SECOND, CDAR, CDDR, CAAAR, CAADR, CADAR, CADDR, THIRD, CDAAR, CDADR, CDDAR, CDDDR, LENGTH, LIST,
 REVERSE, NTH, ASSOC, MEMBER, APPLY, FUNCALL, APPEND, MAPC, MAPCAR, MAPCAN, ADD, SUBTRACT, MULTIPLY,
@@ -114,31 +120,49 @@ typedef struct {
 
 typedef int (*gfun_t)();
 typedef void (*pfun_t)(char);
+#if defined(__AVR_ATmega328P__) || defined(__AVR_ATmega2560__) || defined(__AVR_ATmega1284P__)
+typedef int BitOrder;
+typedef int PinMode;
+#endif
 
 // Workspace - sizes in bytes
 #define WORDALIGNED __attribute__((aligned (2)))
 #define BUFFERSIZE 18
 
 #if defined(__AVR_ATmega328P__)
-#define WORKSPACESIZE 315-SDSIZE        /* Cells (4*bytes) */
+#define WORKSPACESIZE 315-SDSIZE        /* Objects (4*bytes) */
 #define EEPROMSIZE 1024                 /* Bytes */
 #define SYMBOLTABLESIZE BUFFERSIZE      /* Bytes - no long symbols */
 
 #elif defined(__AVR_ATmega2560__)
-#define WORKSPACESIZE 1214-SDSIZE       /* Cells (4*bytes) */
+#define WORKSPACESIZE 1214-SDSIZE       /* Objects (4*bytes) */
 #define EEPROMSIZE 4096                 /* Bytes */
 #define SYMBOLTABLESIZE 512             /* Bytes */
 
 #elif defined(__AVR_ATmega1284P__)
-#define WORKSPACESIZE 2816-SDSIZE       /* Cells (4*bytes) */
+#define WORKSPACESIZE 2816-SDSIZE       /* Objects (4*bytes) */
 #define EEPROMSIZE 4096                 /* Bytes */
 #define SYMBOLTABLESIZE 512             /* Bytes */
+
+#elif defined(ARDUINO_AVR_NANO_EVERY)
+#define WORKSPACESIZE 1068-SDSIZE       /* Objects (4*bytes) */
+#define EEPROMSIZE 256                  /* Bytes */
+#define SYMBOLTABLESIZE BUFFERSIZE      /* Bytes - no long symbols */
+
+#elif defined(__AVR_ATmega4809__)
+#define WORKSPACESIZE 1068-SDSIZE       /* Objects (4*bytes) */
+#define EEPROMSIZE 256                  /* Bytes */
+#define SYMBOLTABLESIZE BUFFERSIZE      /* Bytes - no long symbols */
+
+#elif defined(__AVR_ATtiny3216__)
+#define WORKSPACESIZE 306-SDSIZE        /* Objects (4*bytes) */
+#define EEPROMSIZE 256                  /* Bytes */
+#define SYMBOLTABLESIZE BUFFERSIZE      /* Bytes - no long symbols */
 
 #endif
 
 object Workspace[WORKSPACESIZE] WORDALIGNED;
 char SymbolTable[SYMBOLTABLESIZE];
-typedef int BitOrder;
 #define SDCARD_SS_PIN 10
 
 // Global variables
@@ -158,10 +182,9 @@ int GlobalStringIndex = 0;
 char BreakLevel = 0;
 char LastChar = 0;
 char LastPrint = 0;
-char PrintReadably = 1;
 
 // Flags
-enum flag { RETURNFLAG, ESCAPE, EXITEDITOR, LIBRARYLOADED };
+enum flag { PRINTREADABLY, RETURNFLAG, ESCAPE, EXITEDITOR, LIBRARYLOADED };
 volatile char Flags;
 
 // Forward references
@@ -373,19 +396,9 @@ void SDWriteInt (File file, int data) {
   file.write(data & 0xFF); file.write(data>>8 & 0xFF);
 }
 #else
-typedef struct {
-  unsigned int eval;
-  unsigned int datasize;
-  unsigned int globalenv;
-  unsigned int gcstack;
-  #if SYMBOLTABLESIZE > BUFFERSIZE
-  unsigned int symboltop;
-  char table[SYMBOLTABLESIZE];
-  #endif
-  object data[];
-} struct_image;
-
-struct_image EEMEM image;
+void EEPROMWriteInt (unsigned int *addr, int data) {
+  EEPROM.write((*addr)++, data & 0xFF); EEPROM.write((*addr)++, data>>8 & 0xFF);
+}
 #endif
 
 unsigned int saveimage (object *arg) {
@@ -418,22 +431,32 @@ unsigned int saveimage (object *arg) {
   if (!(arg == NULL || listp(arg))) error(SAVEIMAGE, PSTR("illegal argument"), arg);
   int bytesneeded = imagesize*4 + SYMBOLTABLESIZE + 10;
   if (bytesneeded > EEPROMSIZE) error(SAVEIMAGE, PSTR("image size too large"), number(imagesize));
-  eeprom_update_word(&image.datasize, imagesize);
-  eeprom_update_word(&image.eval, (unsigned int)arg);
-  eeprom_update_word(&image.globalenv, (unsigned int)GlobalEnv);
-  eeprom_update_word(&image.gcstack, (unsigned int)GCStack);
+  unsigned int addr = 0;
+  EEPROMWriteInt(&addr, (unsigned int)arg);
+  EEPROMWriteInt(&addr, imagesize);
+  EEPROMWriteInt(&addr, (unsigned int)GlobalEnv);
+  EEPROMWriteInt(&addr, (unsigned int)GCStack);
   #if SYMBOLTABLESIZE > BUFFERSIZE
-  eeprom_update_word(&image.symboltop, (unsigned int)SymbolTop);
-  eeprom_update_block(SymbolTable, image.table, SYMBOLTABLESIZE);
+  EEPROMWriteInt(&addr, (unsigned int)SymbolTop);
+  for (int i=0; i<SYMBOLTABLESIZE; i++) EEPROM.write(addr++, SymbolTable[i]);
   #endif
-  eeprom_update_block(Workspace, image.data, imagesize*4);
+  for (unsigned int i=0; i<imagesize; i++) {
+    object *obj = &Workspace[i];
+    EEPROMWriteInt(&addr, (uintptr_t)car(obj));
+    EEPROMWriteInt(&addr, (uintptr_t)cdr(obj));
+  }
   return imagesize;
 #endif
 }
 
 #if defined(sdcardsupport)
 int SDReadInt (File file) {
-  uintptr_t b0 = file.read(); uintptr_t b1 = file.read();
+  uint8_t b0 = file.read(); uint8_t b1 = file.read();
+  return b0 | b1<<8;
+}
+#else
+int EEPROMReadInt (unsigned int *addr) {
+  uint8_t b0 = EEPROM.read((*addr)++); uint8_t b1 = EEPROM.read((*addr)++);
   return b0 | b1<<8;
 }
 #endif
@@ -463,15 +486,21 @@ unsigned int loadimage (object *arg) {
   gc(NULL, NULL);
   return imagesize;
 #else
-  unsigned int imagesize = eeprom_read_word(&image.datasize);
+  unsigned int addr = 0;
+  EEPROMReadInt(&addr); // Skip eval address
+  unsigned int imagesize = EEPROMReadInt(&addr);
   if (imagesize == 0 || imagesize == 0xFFFF) error2(LOADIMAGE, PSTR("no saved image"));
-  GlobalEnv = (object *)eeprom_read_word(&image.globalenv);
-  GCStack = (object *)eeprom_read_word(&image.gcstack);
+  GlobalEnv = (object *)EEPROMReadInt(&addr);
+  GCStack = (object *)EEPROMReadInt(&addr);
   #if SYMBOLTABLESIZE > BUFFERSIZE
-  SymbolTop = (char *)eeprom_read_word(&image.symboltop);
-  eeprom_read_block(SymbolTable, image.table, SYMBOLTABLESIZE);
+  SymbolTop = (char *)EEPROMReadInt(&addr);
+  for (int i=0; i<SYMBOLTABLESIZE; i++) SymbolTable[i] = EEPROM.read(addr++);
   #endif
-  eeprom_read_block(Workspace, image.data, imagesize*4);
+  for (int i=0; i<imagesize; i++) {
+    object *obj = &Workspace[i];
+    car(obj) = (object *)EEPROMReadInt(&addr);
+    cdr(obj) = (object *)EEPROMReadInt(&addr);
+  }
   gc(NULL, NULL);
   return imagesize;
 #endif
@@ -489,7 +518,8 @@ void autorunimage () {
     apply(0, autorun, NULL, NULL);
   }
 #else
-  object *autorun = (object *)eeprom_read_word(&image.eval);
+  unsigned int addr = 0;
+  object *autorun = (object *)EEPROMReadInt(&addr);
   if (autorun != NULL && (unsigned int)autorun != 0xFFFF) {
     loadimage(nil);
     apply(0, autorun, NULL, NULL);
@@ -529,11 +559,11 @@ const char notanumber[] PROGMEM = "argument is not a number";
 const char notastring[] PROGMEM = "argument is not a string";
 const char notalist[] PROGMEM = "argument is not a list";
 const char notproper[] PROGMEM = "argument is not a proper list";
-const char notproper2[] PROGMEM = "second argument is not a proper list";
-const char notproper3[] PROGMEM = "third argument is not a proper list";
 const char noargument[] PROGMEM = "missing argument";
 const char nostream[] PROGMEM = "missing stream argument";
 const char overflow[] PROGMEM = "arithmetic overflow";
+const char invalidpin[] PROGMEM = "invalid pin";
+const char resultproper[] PROGMEM = "result is not a proper list";
 
 // Tracing
 
@@ -801,7 +831,7 @@ object *closure (int tc, symbol_t name, object *state, object *function, object 
   if (trace) {
     indent(TraceDepth[trace-1]<<1, pserial);
     pint(TraceDepth[trace-1]++, pserial);
-    pserial(':'); pserial(' '); pserial('('); pstring(lookupbuiltin(name), pserial);
+    pserial(':'); pserial(' '); pserial('('); pstring(symbolname(name), pserial);
   }
   object *params = first(function);
   function = cdr(function);
@@ -942,6 +972,10 @@ uint8_t const TWI_SDA_PIN = 6;
 uint8_t const TWI_SCL_PIN = 5;
 #endif
 
+#if defined(__AVR_ATmega4809__) || defined(__AVR_ATtiny3216__)
+uint32_t const FREQUENCY = 400000L;  // Hardware I2C clock in Hz
+uint32_t const T_RISE = 300L;        // Rise time
+#else
 uint32_t const F_TWI = 400000L;  // Hardware I2C clock in Hz
 uint8_t const TWSR_MTX_DATA_ACK = 0x28;
 uint8_t const TWSR_MTX_ADR_ACK = 0x18;
@@ -950,33 +984,68 @@ uint8_t const TWSR_START = 0x08;
 uint8_t const TWSR_REP_START = 0x10;
 uint8_t const I2C_READ = 1;
 uint8_t const I2C_WRITE = 0;
+#endif
 
 void I2Cinit(bool enablePullup) {
+#if defined(__AVR_ATmega4809__) || defined(__AVR_ATtiny3216__)
+  if (enablePullup) {
+    pinMode(PIN_WIRE_SDA, INPUT_PULLUP);
+    pinMode(PIN_WIRE_SCL, INPUT_PULLUP);
+  }
+  uint32_t baud = ((F_CPU_CORRECTED/FREQUENCY) - (((F_CPU_CORRECTED*T_RISE)/1000)/1000)/1000 - 10)/2;
+  TWI0.MBAUD = (uint8_t)baud;
+  TWI0.MCTRLA = TWI_ENABLE_bm;                                        // Enable as master, no interrupts
+  TWI0.MSTATUS = TWI_BUSSTATE_IDLE_gc;
+#else
   TWSR = 0;                        // no prescaler
   TWBR = (F_CPU/F_TWI - 16)/2;     // set bit rate factor
   if (enablePullup) {
     digitalWrite(TWI_SDA_PIN, HIGH);
     digitalWrite(TWI_SCL_PIN, HIGH);
   }
+#endif
 }
 
-uint8_t I2Cread() {
+int I2Cread() {
+#if defined(__AVR_ATmega4809__) || defined(__AVR_ATtiny3216__)
+  if (I2CCount != 0) I2CCount--;
+  while (!(TWI0.MSTATUS & TWI_RIF_bm));                               // Wait for read interrupt flag
+  uint8_t data = TWI0.MDATA;
+  // Check slave sent ACK?
+  if (I2CCount != 0) TWI0.MCTRLB = TWI_MCMD_RECVTRANS_gc;             // ACK = more bytes to read
+  else TWI0.MCTRLB = TWI_ACKACT_bm | TWI_MCMD_RECVTRANS_gc;           // Send NAK
+  return data;
+#else
   if (I2CCount != 0) I2CCount--;
   TWCR = 1<<TWINT | 1<<TWEN | ((I2CCount == 0) ? 0 : (1<<TWEA));
   while (!(TWCR & 1<<TWINT));
   return TWDR;
+#endif
 }
 
 bool I2Cwrite(uint8_t data) {
+#if defined(__AVR_ATmega4809__) || defined(__AVR_ATtiny3216__)
+  while (!(TWI0.MSTATUS & TWI_WIF_bm));                               // Wait for write interrupt flag
+  TWI0.MDATA = data;
+  TWI0.MCTRLB = TWI_MCMD_RECVTRANS_gc;                                // Do nothing
+  return !(TWI0.MSTATUS & TWI_RXACK_bm);                              // Returns true if slave gave an ACK
+#else
   TWDR = data;
   TWCR = 1<<TWINT | 1 << TWEN;
   while (!(TWCR & 1<<TWINT));
   return (TWSR & 0xF8) == TWSR_MTX_DATA_ACK;
+#endif
 }
 
 bool I2Cstart(uint8_t address, uint8_t read) {
+#if defined(__AVR_ATmega4809__) || defined(__AVR_ATtiny3216__)
+  TWI0.MADDR = address<<1 | read;                                     // Send START condition
+  while (!(TWI0.MSTATUS & (TWI_WIF_bm | TWI_RIF_bm)));                // Wait for write or read interrupt flag
+  if ((TWI0.MSTATUS & TWI_ARBLOST_bm)) return false;                  // Return false if arbitration lost or bus error
+  return !(TWI0.MSTATUS & TWI_RXACK_bm);                              // Return true if slave gave an ACK
+#else
   uint8_t addressRW = address<<1 | read;
-  TWCR = 1<<TWINT | 1<<TWSTA | 1<<TWEN;    // send START condition
+  TWCR = 1<<TWINT | 1<<TWSTA | 1<<TWEN;    // Send START condition
   while (!(TWCR & 1<<TWINT));
   if ((TWSR & 0xF8) != TWSR_START && (TWSR & 0xF8) != TWSR_REP_START) return false;
   TWDR = addressRW;  // send device address and direction
@@ -984,16 +1053,22 @@ bool I2Cstart(uint8_t address, uint8_t read) {
   while (!(TWCR & 1<<TWINT));
   if (addressRW & I2C_READ) return (TWSR & 0xF8) == TWSR_MRX_ADR_ACK;
   else return (TWSR & 0xF8) == TWSR_MTX_ADR_ACK;
+#endif
 }
 
-bool I2Crestart(uint8_t address, uint8_t read) {
+bool I2Crestart (uint8_t address, uint8_t read) {
   return I2Cstart(address, read);
 }
 
-void I2Cstop(uint8_t read) {
+void I2Cstop (uint8_t read) {
+#if defined(__AVR_ATmega4809__) || defined(__AVR_ATtiny3216__)
+  (void) read;
+  TWI0.MCTRLB = TWI_ACKACT_bm | TWI_MCMD_STOP_gc;                     // Send STOP
+#else
   (void) read;
   TWCR = 1<<TWINT | 1<<TWEN | 1<<TWSTO;
   while (TWCR & 1<<TWSTO); // wait until stop and bus released
+#endif
 }
 
 // Streams
@@ -1114,30 +1189,42 @@ pfun_t pstreamfun (object *args) {
 
 void checkanalogread (int pin) {
 #if defined(__AVR_ATmega328P__)
-  if (!(pin>=0 && pin<=5)) error(ANALOGREAD, PSTR("invalid pin"), number(pin));
+  if (!(pin>=0 && pin<=5)) error(ANALOGREAD, invalidpin, number(pin));
 #elif defined(__AVR_ATmega2560__)
-  if (!(pin>=0 && pin<=15)) error(ANALOGREAD, PSTR("invalid pin"), number(pin));
+  if (!(pin>=0 && pin<=15)) error(ANALOGREAD, invalidpin, number(pin));
 #elif defined(__AVR_ATmega1284P__)
-  if (!(pin>=0 && pin<=7)) error(ANALOGREAD, PSTR("invalid pin"), number(pin));
+  if (!(pin>=0 && pin<=7)) error(ANALOGREAD, invalidpin, number(pin));
+#elif defined(__AVR_ATmega4809__)
+  if (!(pin>=14 && pin<=21)) error(ANALOGREAD, invalidpin, number(pin));
+#elif defined(__AVR_ATtiny3216__)
+  if (!(pin>=0 && pin<=5) || !(pin>=8 && pin<=9) || !(pin>=14 && pin<=17)) error(ANALOGREAD, invalidpin, number(pin));
 #endif
 }
 
 void checkanalogwrite (int pin) {
 #if defined(__AVR_ATmega328P__)
-  if (!(pin>=3 && pin<=11 && pin!=4 && pin!=7 && pin!=8)) error(ANALOGWRITE, PSTR("invalid pin"), number(pin));
+  if (!(pin>=3 && pin<=11 && pin!=4 && pin!=7 && pin!=8)) error(ANALOGWRITE, invalidpin, number(pin));
 #elif defined(__AVR_ATmega2560__)
-  if (!((pin>=2 && pin<=13) || (pin>=44 && pin <=46))) error(ANALOGWRITE, PSTR("invalid pin"), number(pin));
+  if (!((pin>=2 && pin<=13) || (pin>=44 && pin <=46))) error(ANALOGWRITE, invalidpin, number(pin));
 #elif defined(__AVR_ATmega1284P__)
-  if (!(pin==3 || pin==4 || pin==6 || pin==7 || (pin>=12 && pin<=15))) error(ANALOGWRITE, PSTR("invalid pin"), number(pin));
+  if (!(pin==3 || pin==4 || pin==6 || pin==7 || (pin>=12 && pin<=15))) error(ANALOGWRITE, invalidpin, number(pin));
+#elif defined(__AVR_ATmega4809__)
+  if (!(pin==3 || pin==5 || pin==6 || pin==9 || pin==10)) error(ANALOGWRITE, invalidpin, number(pin));
+#elif defined(__AVR_ATtiny3216__)
+  if (!(pin==0 || pin==1 || (pin>=7 && pin<=11) || pin==16)) error(ANALOGWRITE, invalidpin, number(pin));
 #endif
 }
 
 // Note
 
+#if defined(__AVR_ATmega4809__) || defined(__AVR_ATtiny3216__)
+const int scale[] PROGMEM = {4186,4435,4699,4978,5274,5588,5920,6272,6645,7040,7459,7902};
+#else
 const uint8_t scale[] PROGMEM = {239,226,213,201,190,179,169,160,151,142,134,127};
+#endif
 
 void playnote (int pin, int note, int octave) {
-  #if defined(__AVR_ATmega328P__)
+#if defined(__AVR_ATmega328P__)
   if (pin == 3) {
     DDRD = DDRD | 1<<DDD3; // PD3 (Arduino D3) as output
     TCCR2A = 0<<COM2A0 | 1<<COM2B0 | 2<<WGM20; // Toggle OC2B on match
@@ -1150,7 +1237,7 @@ void playnote (int pin, int note, int octave) {
   OCR2A = pgm_read_byte(&scale[note%12]) - 1;
   TCCR2B = 0<<WGM22 | prescaler<<CS20;
 
-  #elif defined(__AVR_ATmega2560__)
+#elif defined(__AVR_ATmega2560__)
   if (pin == 9) {
     DDRH = DDRH | 1<<DDH6; // PH6 (Arduino D9) as output
     TCCR2A = 0<<COM2A0 | 1<<COM2B0 | 2<<WGM20; // Toggle OC2B on match
@@ -1163,7 +1250,7 @@ void playnote (int pin, int note, int octave) {
   OCR2A = pgm_read_byte(&scale[note%12]) - 1;
   TCCR2B = 0<<WGM22 | prescaler<<CS20;
 
-  #elif defined(__AVR_ATmega1284P__)
+#elif defined(__AVR_ATmega1284P__)
   if (pin == 14) {
     DDRD = DDRD | 1<<DDD6; // PD6 (Arduino D14) as output
     TCCR2A = 0<<COM2A0 | 1<<COM2B0 | 2<<WGM20; // Toggle OC2B on match
@@ -1175,26 +1262,38 @@ void playnote (int pin, int note, int octave) {
   if (prescaler<3 || prescaler>6) error(NOTE, PSTR("octave out of range"), number(prescaler));
   OCR2A = pgm_read_byte(&scale[note%12]) - 1;
   TCCR2B = 0<<WGM22 | prescaler<<CS20;
+
+#elif defined(__AVR_ATmega4809__) || defined(__AVR_ATtiny3216__)
+  int prescaler = 8 - octave - note/12;
+  if (prescaler<0 || prescaler>8) error(NOTE, PSTR("octave out of range"), number(prescaler));
+  tone(pin, scale[note%12]>>prescaler);
   #endif
 }
 
 void nonote (int pin) {
+#if defined(__AVR_ATmega4809__) || defined(__AVR_ATtiny3216__)
+  noTone(pin);
+#else
   (void) pin;
   TCCR2B = 0<<WGM22 | 0<<CS20;
+#endif
 }
 
 // Sleep
 
-// Interrupt vector for sleep watchdog
-ISR(WDT_vect) {
+#if !defined(__AVR_ATmega4809__) && !defined(__AVR_ATtiny3216__)
+  // Interrupt vector for sleep watchdog
+  ISR(WDT_vect) {
   WDTCSR |= 1<<WDIE;
 }
+#endif
 
 void initsleep () {
   set_sleep_mode(SLEEP_MODE_PWR_DOWN);
 }
 
 void sleep (int secs) {
+#if !defined(__AVR_ATmega4809__) && !defined(__AVR_ATtiny3216__)
   // Set up Watchdog timer for 1 Hz interrupt
   WDTCSR = 1<<WDCE | 1<<WDE;
   WDTCSR = 1<<WDIE | 6<<WDP0;     // 1 sec interrupt
@@ -1219,6 +1318,9 @@ void sleep (int secs) {
   PRR = PRR & ~(1<<PRTIM0);
 #elif defined(__AVR_ATmega2560__) || defined(__AVR_ATmega1284P__)
   PRR0 = PRR0 & ~(1<<PRTIM0);
+#endif
+#else
+  delay(1000*secs);
 #endif
 }
 
@@ -1263,7 +1365,6 @@ object *sp_setq (object *args, object *env) {
 }
 
 object *sp_loop (object *args, object *env) {
-  clrflag(RETURNFLAG);
   object *start = args;
   for (;;) {
     args = start;
@@ -1276,6 +1377,12 @@ object *sp_loop (object *args, object *env) {
       args = cdr(args);
     }
   }
+}
+
+object *sp_return (object *args, object *env) {
+  object *result = eval(tf_progn(args,env), env);
+  setflag(RETURNFLAG);
+  return result;
 }
 
 object *sp_push (object *args, object *env) {
@@ -1340,22 +1447,26 @@ object *sp_dolist (object *args, object *env) {
   if (args == NULL) error2(DOLIST, noargument);
   object *params = first(args);
   object *var = first(params);
-  object *result;
   object *list = eval(second(params), env);
   push(list, GCStack); // Don't GC the list
   object *pair = cons(var,nil);
   push(pair,env);
   params = cdr(cdr(params));
-  object *forms = cdr(args);
+  args = cdr(args);
   while (list != NULL) {
     if (improperp(list)) error(DOLIST, notproper, list);
     cdr(pair) = first(list);
-    list = cdr(list);
-    result = eval(tf_progn(forms,env), env);
-    if (tstflag(RETURNFLAG)) {
-      clrflag(RETURNFLAG);
-      return result;
+    object *forms = args;
+    while (forms != NULL) {
+      object *result = eval(car(forms), env);
+      if (tstflag(RETURNFLAG)) {
+        clrflag(RETURNFLAG);
+        pop(GCStack);
+        return result;
+      }
+      forms = cdr(forms);
     }
+    list = cdr(list);
   }
   cdr(pair) = nil;
   pop(GCStack);
@@ -1367,21 +1478,24 @@ object *sp_dotimes (object *args, object *env) {
   if (args == NULL) error2(DOTIMES, noargument);
   object *params = first(args);
   object *var = first(params);
-  object *result;
   int count = checkinteger(DOTIMES, eval(second(params), env));
   int index = 0;
   params = cdr(cdr(params));
   object *pair = cons(var,number(0));
   push(pair,env);
-  object *forms = cdr(args);
+  args = cdr(args);
   while (index < count) {
     cdr(pair) = number(index);
-    index++;
-    result = eval(tf_progn(forms,env), env);
-    if (tstflag(RETURNFLAG)) {
-      clrflag(RETURNFLAG);
-      return result;
+    object *forms = args;
+    while (forms != NULL) {
+      object *result = eval(car(forms), env);
+      if (tstflag(RETURNFLAG)) {
+        clrflag(RETURNFLAG);
+        return result;
+      }
+      forms = cdr(forms);
     }
+    index++;
   }
   cdr(pair) = number(index);
   if (params == NULL) return nil;
@@ -1547,17 +1661,11 @@ object *tf_progn (object *args, object *env) {
   if (args == NULL) return nil;
   object *more = cdr(args);
   while (more != NULL) {
-    object *result = eval(car(args),env);
-    if (tstflag(RETURNFLAG)) return result;
+    eval(car(args), env);
     args = more;
     more = cdr(args);
   }
   return car(args);
-}
-
-object *tf_return (object *args, object *env) {
-  setflag(RETURNFLAG);
-  return tf_progn(args, env);
 }
 
 object *tf_if (object *args, object *env) {
@@ -1777,7 +1885,7 @@ object *fn_nth (object *args, object *env) {
   int n = checkinteger(NTH, first(args));
   object *list = second(args);
   while (list != NULL) {
-    if (improperp(list)) error(NTH, notproper2, list);
+    if (improperp(list)) error(NTH, notproper, list);
     if (n == 0) return car(list);
     list = cdr(list);
     n--;
@@ -1843,100 +1951,93 @@ object *fn_append (object *args, object *env) {
 
 object *fn_mapc (object *args, object *env) {
   object *function = first(args);
-  object *list1 = second(args);
-  object *result = list1;
-  object *list2 = cddr(args);
-  if (list2 != NULL) {
-    list2 = car(list2);
-    object *result2 = list2;
-    while (list1 != NULL && list2 != NULL) {
-      if (improperp(list1)) error(MAPC, notproper2, result);
-      if (improperp(list2)) error(MAPC, notproper3, result2);
-      apply(MAPC, function, cons(car(list1),cons(car(list2),NULL)), env);
-      list1 = cdr(list1); list2 = cdr(list2);
+  args = cdr(args);
+  object *result = first(args);
+  object *params = cons(NULL, NULL);
+  push(params,GCStack);
+  // Make parameters
+  while (true) {
+    object *tailp = params;
+    object *lists = args;
+    while (lists != NULL) {
+      object *list = car(lists);
+      if (list == NULL) {
+         pop(GCStack);
+         return result;
+      }
+      if (improperp(list)) error(MAPC, notproper, list);
+      object *obj = cons(first(list),NULL);
+      car(lists) = cdr(list);
+      cdr(tailp) = obj; tailp = obj;
+      lists = cdr(lists);
     }
-  } else {
-    while (list1 != NULL) {
-      if (improperp(list1)) error(MAPC, notproper2, result);
-      apply(MAPC, function, cons(car(list1),NULL), env);
-      list1 = cdr(list1);
-    }
+    apply(MAPC, function, cdr(params), env);
   }
-  return result;
 }
 
 object *fn_mapcar (object *args, object *env) {
   object *function = first(args);
-  object *list1 = second(args);
-  object *result = list1;
-  object *list2 = cddr(args);
-  object *head = cons(NULL, NULL);
+  args = cdr(args);
+  object *params = cons(NULL, NULL);
+  push(params,GCStack);
+  object *head = cons(NULL, NULL); 
   push(head,GCStack);
   object *tail = head;
-  if (list2 != NULL) {
-    list2 = car(list2);
-    object *result2 = list2;
-    while (list1 != NULL && list2 != NULL) {
-      if (improperp(list1)) error(MAPCAR, notproper2, result);
-      if (improperp(list2)) error(MAPCAR, notproper3, result2);
-      object *result = apply(MAPCAR, function, cons(car(list1), cons(car(list2),NULL)), env);
-      object *obj = cons(result,NULL);
-      cdr(tail) = obj;
-      tail = obj;
-      list1 = cdr(list1); list2 = cdr(list2);
+  // Make parameters
+  while (true) {
+    object *tailp = params;
+    object *lists = args;
+    while (lists != NULL) {
+      object *list = car(lists);
+      if (list == NULL) {
+         pop(GCStack);
+         pop(GCStack);
+         return cdr(head);
+      }
+      if (improperp(list)) error(MAPCAR, notproper, list);
+      object *obj = cons(first(list),NULL);
+      car(lists) = cdr(list);
+      cdr(tailp) = obj; tailp = obj;
+      lists = cdr(lists);
     }
-  } else if (list1 != NULL) {
-    while (list1 != NULL) {
-      if (improperp(list1)) error(MAPCAR, notproper2, result);
-      object *result = apply(MAPCAR, function, cons(car(list1),NULL), env);
-      object *obj = cons(result,NULL);
-      cdr(tail) = obj;
-      tail = obj;
-      list1 = cdr(list1);
-    }
+    object *result = apply(MAPCAR, function, cdr(params), env);
+    object *obj = cons(result,NULL);
+    cdr(tail) = obj; tail = obj;
   }
-  pop(GCStack);
-  return cdr(head);
 }
 
 object *fn_mapcan (object *args, object *env) {
   object *function = first(args);
-  object *list1 = second(args);
-  object *result = list1;
-  object *list2 = cddr(args);
-  object *head = cons(NULL, NULL);
+  args = cdr(args);
+  object *params = cons(NULL, NULL);
+  push(params,GCStack);
+  object *head = cons(NULL, NULL); 
   push(head,GCStack);
   object *tail = head;
-  if (list2 != NULL) {
-    list2 = car(list2);
-    object *result2 = list2;
-    while (list1 != NULL && list2 != NULL) {
-      if (improperp(list1)) error(MAPCAN, notproper2, result);
-      if (improperp(list2)) error(MAPCAN, notproper3, result2);
-      object *result = apply(MAPCAN, function, cons(car(list1), cons(car(list2),NULL)), env);
-      while ((unsigned int)result >= PAIR) {
-        cdr(tail) = result;
-        tail = result;
-        result = cdr(result);
+  // Make parameters
+  while (true) {
+    object *tailp = params;
+    object *lists = args;
+    while (lists != NULL) {
+      object *list = car(lists);
+      if (list == NULL) {
+         pop(GCStack);
+         pop(GCStack);
+         return cdr(head);
       }
-      if (cdr(list1) != NULL && cdr(list2) != NULL && result != NULL) error2(MAPCAN, PSTR("result is not a proper list"));
-      list1 = cdr(list1); list2 = cdr(list2);
+      if (improperp(list)) error(MAPCAN, notproper, list);
+      object *obj = cons(first(list),NULL);
+      car(lists) = cdr(list);
+      cdr(tailp) = obj; tailp = obj;
+      lists = cdr(lists);
     }
-  } else if (list1 != NULL) {
-    while (list1 != NULL) {
-      if (improperp(list1)) error(MAPCAN, notproper2, result);
-      object *result = apply(MAPCAN, function, cons(car(list1),NULL), env);
-      while ((unsigned int)result >= PAIR) {
-        cdr(tail) = result;
-        tail = result;
-        result = cdr(result);
-      }
-      if (cdr(list1) != NULL && result != NULL) error2(MAPCAN, PSTR("result is not a proper list"));
-      list1 = cdr(list1);
+    object *result = apply(MAPCAN, function, cdr(params), env);
+    while (consp(result)) {
+      cdr(tail) = result; tail = result;
+      result = cdr(result);
     }
+    if (result != NULL) error(MAPCAN, resultproper, result);
   }
-  pop(GCStack);
-  return cdr(head);
 }
 
 // Arithmetic functions
@@ -2402,10 +2503,10 @@ object *fn_princtostring (object *args, object *env) {
   obj->type = STRING;
   GlobalString = NULL;
   GlobalStringIndex = 0;
-  char temp = PrintReadably;
-  PrintReadably = 0;
+  char temp = Flags;
+  clrflag(PRINTREADABLY);
   printobject(arg, pstr);
-  PrintReadably = temp;
+  Flags = temp;
   obj->cdr = GlobalString;
   return obj;
 }
@@ -2464,10 +2565,8 @@ object *fn_ash (object *args, object *env) {
   (void) env;
   int value = checkinteger(ASH, first(args));
   int count = checkinteger(ASH, second(args));
-  if (count >= 0)
-    return number(value << count);
-  else
-    return number(value >> abs(count));
+  if (count >= 0) return number(value << count);
+  else return number(value >> abs(count));
 }
 
 object *fn_logbitp (object *args, object *env) {
@@ -2538,10 +2637,10 @@ object *fn_princ (object *args, object *env) {
   (void) env;
   object *obj = first(args);
   pfun_t pfun = pstreamfun(cdr(args));
-  char temp = PrintReadably;
-  PrintReadably = 0;
+  char temp = Flags;
+  clrflag(PRINTREADABLY);
   printobject(obj, pfun);
-  PrintReadably = temp;
+  Flags = temp;
   return obj;
 }
 
@@ -2577,10 +2676,10 @@ object *fn_writestring (object *args, object *env) {
   (void) env;
   object *obj = first(args);
   pfun_t pfun = pstreamfun(cdr(args));
-  char temp = PrintReadably;
-  PrintReadably = 0;
+  char temp = Flags;
+  clrflag(PRINTREADABLY);
   printstring(obj, pfun);
-  PrintReadably = temp;
+  Flags = temp;
   return nil;
 }
 
@@ -2588,11 +2687,11 @@ object *fn_writeline (object *args, object *env) {
   (void) env;
   object *obj = first(args);
   pfun_t pfun = pstreamfun(cdr(args));
-  char temp = PrintReadably;
-  PrintReadably = 0;
+  char temp = Flags;
+  clrflag(PRINTREADABLY);
   printstring(obj, pfun);
   pln(pfun);
-  PrintReadably = temp;
+  Flags = temp;
   return nil;
 }
 
@@ -2652,7 +2751,7 @@ object *fn_cls (object *args, object *env) {
 object *fn_pinmode (object *args, object *env) {
   (void) env;
   int pin = checkinteger(PINMODE, first(args));
-  int pm = INPUT;
+  PinMode pm = INPUT;
   object *mode = second(args);
   if (integerp(mode)) {
     int nmode = checkinteger(PINMODE, mode);
@@ -2675,8 +2774,8 @@ object *fn_digitalwrite (object *args, object *env) {
   (void) env;
   int pin = checkinteger(DIGITALWRITE, first(args));
   object *mode = second(args);
-  if (integerp(mode)) digitalWrite(pin, mode->integer);
-  else digitalWrite(pin, (mode != nil));
+  if (integerp(mode)) digitalWrite(pin, mode->integer ? HIGH : LOW);
+  else digitalWrite(pin, (mode != nil) ? HIGH : LOW);
   return mode;
 }
 
@@ -2814,7 +2913,11 @@ void supersub (object *form, int lm, int super, pfun_t pfun) {
     int name = arg->name;
     if (name == DEFUN) special = 2;
     else for (int i=0; i<ppspecials; i++) {
-      if (name == pgm_read_byte(&ppspecial[i])) { special = 1; break; }    
+      #if defined(__AVR_ATmega4809__) || defined(__AVR_ATtiny3216__)
+      if (name == ppspecial[i]) { special = 1; break; }    
+      #else
+      if (name == pgm_read_byte(&ppspecial[i])) { special = 1; break; }
+      #endif   
     } 
   }
   while (form != NULL) {
@@ -2917,23 +3020,23 @@ const char string11[] PROGMEM = "defun";
 const char string12[] PROGMEM = "defvar";
 const char string13[] PROGMEM = "setq";
 const char string14[] PROGMEM = "loop";
-const char string15[] PROGMEM = "push";
-const char string16[] PROGMEM = "pop";
-const char string17[] PROGMEM = "incf";
-const char string18[] PROGMEM = "decf";
-const char string19[] PROGMEM = "setf";
-const char string20[] PROGMEM = "dolist";
-const char string21[] PROGMEM = "dotimes";
-const char string22[] PROGMEM = "trace";
-const char string23[] PROGMEM = "untrace";
-const char string24[] PROGMEM = "for-millis";
-const char string25[] PROGMEM = "with-serial";
-const char string26[] PROGMEM = "with-i2c";
-const char string27[] PROGMEM = "with-spi";
-const char string28[] PROGMEM = "with-sd-card";
-const char string29[] PROGMEM = "tail_forms";
-const char string30[] PROGMEM = "progn";
-const char string31[] PROGMEM = "return";
+const char string15[] PROGMEM = "return";
+const char string16[] PROGMEM = "push";
+const char string17[] PROGMEM = "pop";
+const char string18[] PROGMEM = "incf";
+const char string19[] PROGMEM = "decf";
+const char string20[] PROGMEM = "setf";
+const char string21[] PROGMEM = "dolist";
+const char string22[] PROGMEM = "dotimes";
+const char string23[] PROGMEM = "trace";
+const char string24[] PROGMEM = "untrace";
+const char string25[] PROGMEM = "for-millis";
+const char string26[] PROGMEM = "with-serial";
+const char string27[] PROGMEM = "with-i2c";
+const char string28[] PROGMEM = "with-spi";
+const char string29[] PROGMEM = "with-sd-card";
+const char string30[] PROGMEM = "tail_forms";
+const char string31[] PROGMEM = "progn";
 const char string32[] PROGMEM = "if";
 const char string33[] PROGMEM = "cond";
 const char string34[] PROGMEM = "when";
@@ -3079,23 +3182,23 @@ const tbl_entry_t lookup_table[] PROGMEM = {
   { string12, sp_defvar, 2, 2 },
   { string13, sp_setq, 2, 2 },
   { string14, sp_loop, 0, 127 },
-  { string15, sp_push, 2, 2 },
-  { string16, sp_pop, 1, 1 },
-  { string17, sp_incf, 1, 2 },
-  { string18, sp_decf, 1, 2 },
-  { string19, sp_setf, 2, 2 },
-  { string20, sp_dolist, 1, 127 },
-  { string21, sp_dotimes, 1, 127 },
-  { string22, sp_trace, 0, 1 },
-  { string23, sp_untrace, 0, 1 },
-  { string24, sp_formillis, 1, 127 },
-  { string25, sp_withserial, 1, 127 },
-  { string26, sp_withi2c, 1, 127 },
-  { string27, sp_withspi, 1, 127 },
-  { string28, sp_withsdcard, 2, 127 },
-  { string29, NULL, NIL, NIL },
-  { string30, tf_progn, 0, 127 },
-  { string31, tf_return, 0, 127 },
+  { string15, sp_return, 0, 127 },
+  { string16, sp_push, 2, 2 },
+  { string17, sp_pop, 1, 1 },
+  { string18, sp_incf, 1, 2 },
+  { string19, sp_decf, 1, 2 },
+  { string20, sp_setf, 2, 2 },
+  { string21, sp_dolist, 1, 127 },
+  { string22, sp_dotimes, 1, 127 },
+  { string23, sp_trace, 0, 1 },
+  { string24, sp_untrace, 0, 1 },
+  { string25, sp_formillis, 1, 127 },
+  { string26, sp_withserial, 1, 127 },
+  { string27, sp_withi2c, 1, 127 },
+  { string28, sp_withspi, 1, 127 },
+  { string29, sp_withsdcard, 2, 127 },
+  { string30, NULL, NIL, NIL },
+  { string31, tf_progn, 0, 127 },
   { string32, tf_if, 2, 3 },
   { string33, tf_cond, 0, 127 },
   { string34, tf_when, 1, 127 },
@@ -3140,9 +3243,9 @@ const tbl_entry_t lookup_table[] PROGMEM = {
   { string73, fn_apply, 2, 127 },
   { string74, fn_funcall, 1, 127 },
   { string75, fn_append, 0, 127 },
-  { string76, fn_mapc, 2, 3 },
-  { string77, fn_mapcar, 2, 3 },
-  { string78, fn_mapcan, 2, 3 },
+  { string76, fn_mapc, 2, 127 },
+  { string77, fn_mapcar, 2, 127 },
+  { string78, fn_mapcan, 2, 127 },
   { string79, fn_add, 0, 127 },
   { string80, fn_subtract, 1, 127 },
   { string81, fn_multiply, 0, 127 },
@@ -3231,7 +3334,11 @@ const tbl_entry_t lookup_table[] PROGMEM = {
 int builtin (char* n) {
   int entry = 0;
   while (entry < ENDFUNCTIONS) {
+    #if defined(__AVR_ATmega4809__) || defined(__AVR_ATtiny3216__)
+    if (strcasecmp(n, (char*)lookup_table[entry].string) == 0)
+    #else
     if (strcasecmp_P(n, (char*)pgm_read_word(&lookup_table[entry].string)) == 0)
+    #endif
       return entry;
     entry++;
   }
@@ -3253,20 +3360,36 @@ int longsymbol (char *buffer) {
 }
 
 intptr_t lookupfn (symbol_t name) {
+  #if defined(__AVR_ATmega4809__) || defined(__AVR_ATtiny3216__)
+  return (intptr_t)lookup_table[name].fptr;
+  #else
   return pgm_read_word(&lookup_table[name].fptr);
+  #endif
 }
 
 uint8_t lookupmin (symbol_t name) {
+  #if defined(__AVR_ATmega4809__) || defined(__AVR_ATtiny3216__)
+  return lookup_table[name].min;
+  #else
   return pgm_read_byte(&lookup_table[name].min);
+  #endif
 }
 
 uint8_t lookupmax (symbol_t name) {
+  #if defined(__AVR_ATmega4809__) || defined(__AVR_ATtiny3216__)
+  return lookup_table[name].max;
+  #else
   return pgm_read_byte(&lookup_table[name].max);
+  #endif
 }
 
 char *lookupbuiltin (symbol_t name) {
   char *buffer = SymbolTop;
+  #if defined(__AVR_ATmega4809__) || defined(__AVR_ATtiny3216__)
+  strcpy(buffer, (char *)(lookup_table[name].string));
+  #else
   strcpy_P(buffer, (char *)(pgm_read_word(&lookup_table[name].string)));
+  #endif
   return buffer;
 }
 
@@ -3454,13 +3577,13 @@ const char ControlCodes[] PROGMEM = "Null\0SOH\0STX\0ETX\0EOT\0ENQ\0ACK\0Bell\0B
 "Page\0Return\0SO\0SI\0DLE\0DC1\0DC2\0DC3\0DC4\0NAK\0SYN\0ETB\0CAN\0EM\0SUB\0Escape\0FS\0GS\0RS\0US\0Space\0";
 
 void pcharacter (char c, pfun_t pfun) {
-  if (!PrintReadably) pfun(c);
+  if (!tstflag(PRINTREADABLY)) pfun(c);
   else {
     pfun('#'); pfun('\\');
     if (c > 32) pfun(c);
     else {
-      PGM_P p = ControlCodes;
-      while (c > 0) {p = p + strlen_P(p) + 1; c--; }
+      const char *p = ControlCodes;
+      while (c > 0) {p = p + strlen(p) + 1; c--; }
       pfstring(p, pfun);
     }
   }
@@ -3471,24 +3594,28 @@ void pstring (char *s, pfun_t pfun) {
 }
 
 void printstring (object *form, pfun_t pfun) {
-  if (PrintReadably) pfun('"');
+  if (tstflag(PRINTREADABLY)) pfun('"');
   form = cdr(form);
   while (form != NULL) {
     int chars = form->integer;
     for (int i=(sizeof(int)-1)*8; i>=0; i=i-8) {
       char ch = chars>>i & 0xFF;
-      if (PrintReadably && (ch == '"' || ch == '\\')) pfun('\\');
+      if (tstflag(PRINTREADABLY) && (ch == '"' || ch == '\\')) pfun('\\');
       if (ch) pfun(ch);
     }
     form = car(form);
   }
-  if (PrintReadably) pfun('"');
+  if (tstflag(PRINTREADABLY)) pfun('"');
 }
 
 void pfstring (PGM_P s, pfun_t pfun) {
-  intptr_t p = (intptr_t)s;
+  int p = 0;
   while (1) {
-    char c = pgm_read_byte(p++);
+    #if defined(__AVR_ATmega4809__) || defined(__AVR_ATtiny3216__)
+    char c = s[p++];
+    #else
+    char c = pgm_read_byte(&s[p++]);
+    #endif
     if (c == 0) return;
     pfun(c);
   }
@@ -3559,7 +3686,11 @@ int glibrary () {
     LastChar = 0;
     return temp;
   }
+  #if defined(__AVR_ATmega4809__) || defined(__AVR_ATtiny3216__)
+  char c = LispLibrary[GlobalStringIndex++];
+  #else
   char c = pgm_read_byte(&LispLibrary[GlobalStringIndex++]);
+  #endif
   return (c != 0) ? c : -1; // -1?
 }
 
@@ -3646,8 +3777,13 @@ object *nextitem (gfun_t gfun) {
     if (index == 1) return character(buffer[0]);
     PGM_P p = ControlCodes; char c = 0;
     while (c < 33) {
+      #if defined(__AVR_ATmega4809__) || defined(__AVR_ATtiny3216__)
+      if (strcasecmp(buffer, p) == 0) return character(c);
+      p = p + strlen(p) + 1; c++;
+      #else
       if (strcasecmp_P(buffer, p) == 0) return character(c);
       p = p + strlen_P(p) + 1; c++;
+      #endif
     }
     error2(0, PSTR("Unknown character"));
   }
@@ -3702,12 +3838,16 @@ void initenv () {
 
 void setup () {
   Serial.begin(9600);
+  #if defined(ARDUINO_AVR_NANO_EVERY) || defined(__AVR_ATtiny3216__)
+  delay(2500);
+  #else
   int start = millis();
-  while (millis() - start < 5000) { if (Serial) break; }
+  while ((millis() - start) < 5000) { if (Serial) break; }
+  #endif
   initworkspace();
   initenv();
   initsleep();
-  pfstring(PSTR("uLisp 2.8 "), pserial); pln(pserial);
+  pfstring(PSTR("uLisp 2.9 "), pserial); pln(pserial);
 }
 
 // Read/Evaluate/Print loop
