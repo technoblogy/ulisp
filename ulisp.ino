@@ -1,5 +1,5 @@
-/* uLisp AVR Version 2.9 - www.ulisp.com
-   David Johnson-Davies - www.technoblogy.com - 20th September 2019
+/* uLisp AVR Version 2.9a - www.ulisp.com
+   David Johnson-Davies - www.technoblogy.com - 22nd September 2019
 
    Licensed under the MIT license: https://opensource.org/licenses/MIT
 */
@@ -1211,7 +1211,7 @@ void checkanalogwrite (int pin) {
 #elif defined(__AVR_ATmega4809__)
   if (!(pin==3 || pin==5 || pin==6 || pin==9 || pin==10)) error(ANALOGWRITE, invalidpin, number(pin));
 #elif defined(__AVR_ATtiny3216__)
-  if (!(pin==0 || pin==1 || (pin>=7 && pin<=11) || pin==16)) error(ANALOGWRITE, invalidpin, number(pin));
+  if (!((pin>=0 && pin<=2) || (pin>=7 && pin<=11) || pin==16)) error(ANALOGWRITE, invalidpin, number(pin));
 #endif
 }
 
