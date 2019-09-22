@@ -1197,7 +1197,7 @@ void checkanalogread (int pin) {
 #elif defined(__AVR_ATmega4809__)
   if (!(pin>=14 && pin<=21)) error(ANALOGREAD, invalidpin, number(pin));
 #elif defined(__AVR_ATtiny3216__)
-  if (!(pin>=0 && pin<=5) || !(pin>=8 && pin<=9) || !(pin>=14 && pin<=17)) error(ANALOGREAD, invalidpin, number(pin));
+  if (!(pin>=0 && pin<=17)) error(ANALOGREAD, invalidpin, number(pin));
 #endif
 }
 
@@ -3838,7 +3838,7 @@ void initenv () {
 
 void setup () {
   Serial.begin(9600);
-  #if defined(ARDUINO_AVR_NANO_EVERY) || defined(__AVR_ATtiny3216__)
+  #if defined(ARDUINO_AVR_NANO_EVERY)
   delay(2500);
   #else
   int start = millis();
