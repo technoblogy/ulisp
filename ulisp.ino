@@ -1,5 +1,5 @@
-/* uLisp AVR Version 2.9a - www.ulisp.com
-   David Johnson-Davies - www.technoblogy.com - 22nd September 2019
+/* uLisp AVR Version 2.9b - www.ulisp.com
+   David Johnson-Davies - www.technoblogy.com - 25th September 2019
 
    Licensed under the MIT license: https://opensource.org/licenses/MIT
 */
@@ -1197,7 +1197,7 @@ void checkanalogread (int pin) {
 #elif defined(__AVR_ATmega4809__)
   if (!(pin>=14 && pin<=21)) error(ANALOGREAD, invalidpin, number(pin));
 #elif defined(__AVR_ATtiny3216__)
-  if (!(pin>=0 && pin<=17)) error(ANALOGREAD, invalidpin, number(pin));
+  if (!((pin>=0 && pin<=5) || pin==8 || pin==9 || (pin>=14 && pin<=17))) error(ANALOGREAD, invalidpin, number(pin));
 #endif
 }
 
@@ -1357,10 +1357,14 @@ object *sp_defvar (object *args, object *env) {
 }
 
 object *sp_setq (object *args, object *env) {
-  checkargs(SETQ, args);
-  object *arg = eval(second(args), env);
-  object *pair = findvalue(first(args), env);
-  cdr(pair) = arg;
+  object *arg = nil;
+  while (args != NULL) {
+    if (cdr(args) == NULL) error2(SETQ, PSTR("odd number of parameters"));
+    object *pair = findvalue(first(args), env);
+    arg = eval(second(args), env);
+    cdr(pair) = arg;
+    args = cddr(args);
+  }
   return arg;
 }
 
@@ -1436,11 +1440,15 @@ object *sp_decf (object *args, object *env) {
 }
 
 object *sp_setf (object *args, object *env) {
-  checkargs(SETF, args); 
-  object **loc = place(SETF, first(args), env);
-  object *result = eval(second(args), env);
-  *loc = result;
-  return result;
+  object *arg = nil;
+  while (args != NULL) {
+    if (cdr(args) == NULL) error2(SETF, PSTR("odd number of parameters"));
+    object **loc = place(SETF, first(args), env);
+    arg = eval(second(args), env);
+    *loc = arg;
+    args = cddr(args);
+  }
+  return arg;
 }
 
 object *sp_dolist (object *args, object *env) {
@@ -1661,7 +1669,8 @@ object *tf_progn (object *args, object *env) {
   if (args == NULL) return nil;
   object *more = cdr(args);
   while (more != NULL) {
-    eval(car(args), env);
+    object *result = eval(car(args),env);
+    if (tstflag(RETURNFLAG)) return result;
     args = more;
     more = cdr(args);
   }
@@ -2703,7 +2712,7 @@ object *fn_restarti2c (object *args, object *env) {
   I2CCount = 0;
   if (args != NULL) {
     object *rw = first(args);
-    if (integerp(rw)) I2CCount = checkinteger(RESTARTI2C, rw);
+    if (integerp(rw)) I2CCount = rw->integer;
     read = (rw != NULL);
   }
   int address = stream & 0xFF;
@@ -2754,7 +2763,7 @@ object *fn_pinmode (object *args, object *env) {
   PinMode pm = INPUT;
   object *mode = second(args);
   if (integerp(mode)) {
-    int nmode = checkinteger(PINMODE, mode);
+    int nmode = mode->integer;
     if (nmode == 1) pm = OUTPUT; else if (nmode == 2) pm = INPUT_PULLUP;
     #if defined(INPUT_PULLDOWN)
     else if (nmode == 4) pm = INPUT_PULLDOWN;
@@ -2964,6 +2973,7 @@ object *fn_pprintall (object *args, object *env) {
 // LispLibrary
 
 object *fn_require (object *args, object *env) {
+#if !defined(__AVR_ATtiny3216__)
   object *arg = first(args);
   object *globals = GlobalEnv;
   if (!symbolp(arg)) error(REQUIRE, PSTR("argument is not a symbol"), arg);
@@ -2984,7 +2994,10 @@ object *fn_require (object *args, object *env) {
     }
     line = read(glibrary);
   }
-  return nil; 
+  return nil;
+#else
+  error2(REQUIRE, PSTR("not supported"));
+#endif
 }
 
 object *fn_listlibrary (object *args, object *env) {
@@ -3180,14 +3193,14 @@ const tbl_entry_t lookup_table[] PROGMEM = {
   { string10, sp_quote, 1, 1 },
   { string11, sp_defun, 0, 127 },
   { string12, sp_defvar, 2, 2 },
-  { string13, sp_setq, 2, 2 },
+  { string13, sp_setq, 2, 126 },
   { string14, sp_loop, 0, 127 },
   { string15, sp_return, 0, 127 },
   { string16, sp_push, 2, 2 },
   { string17, sp_pop, 1, 1 },
   { string18, sp_incf, 1, 2 },
   { string19, sp_decf, 1, 2 },
-  { string20, sp_setf, 2, 2 },
+  { string20, sp_setf, 2, 126 },
   { string21, sp_dolist, 1, 127 },
   { string22, sp_dotimes, 1, 127 },
   { string23, sp_trace, 0, 1 },
