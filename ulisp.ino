@@ -1,5 +1,5 @@
-/* uLisp AVR Version 2.9b - www.ulisp.com
-   David Johnson-Davies - www.technoblogy.com - 25th September 2019
+/* uLisp AVR Version 2.9c - www.ulisp.com
+   David Johnson-Davies - www.technoblogy.com - 2nd October 2019
 
    Licensed under the MIT license: https://opensource.org/licenses/MIT
 */
@@ -145,6 +145,16 @@ typedef int PinMode;
 #define SYMBOLTABLESIZE 512             /* Bytes */
 
 #elif defined(ARDUINO_AVR_NANO_EVERY)
+#define WORKSPACESIZE 1068-SDSIZE       /* Objects (4*bytes) */
+#define EEPROMSIZE 256                  /* Bytes */
+#define SYMBOLTABLESIZE BUFFERSIZE      /* Bytes - no long symbols */
+
+#elif defined(ARDUINO_AVR_ATmega4809)   /* Curiosity Nano using MegaCoreX */
+#define Serial Serial3
+#define WORKSPACESIZE 1068-SDSIZE       /* Objects (4*bytes) */
+#define EEPROMSIZE 256                  /* Bytes */
+#define SYMBOLTABLESIZE BUFFERSIZE      /* Bytes - no long symbols */
+
 #define WORKSPACESIZE 1068-SDSIZE       /* Objects (4*bytes) */
 #define EEPROMSIZE 256                  /* Bytes */
 #define SYMBOLTABLESIZE BUFFERSIZE      /* Bytes - no long symbols */
@@ -1194,6 +1204,8 @@ void checkanalogread (int pin) {
   if (!(pin>=0 && pin<=15)) error(ANALOGREAD, invalidpin, number(pin));
 #elif defined(__AVR_ATmega1284P__)
   if (!(pin>=0 && pin<=7)) error(ANALOGREAD, invalidpin, number(pin));
+#elif defined(ARDUINO_AVR_ATmega4809)  /* MegaCoreX core */
+  if (!((pin>=22 && pin<=33) || (pin>=36 && pin<=39))) error(ANALOGREAD, invalidpin, number(pin));
 #elif defined(__AVR_ATmega4809__)
   if (!(pin>=14 && pin<=21)) error(ANALOGREAD, invalidpin, number(pin));
 #elif defined(__AVR_ATtiny3216__)
@@ -1208,6 +1220,8 @@ void checkanalogwrite (int pin) {
   if (!((pin>=2 && pin<=13) || (pin>=44 && pin <=46))) error(ANALOGWRITE, invalidpin, number(pin));
 #elif defined(__AVR_ATmega1284P__)
   if (!(pin==3 || pin==4 || pin==6 || pin==7 || (pin>=12 && pin<=15))) error(ANALOGWRITE, invalidpin, number(pin));
+#elif defined(ARDUINO_AVR_ATmega4809)  /* MegaCoreX core */
+  if (!((pin>=16 && pin<=19) || (pin>=38 && pin<=39))) error(ANALOGWRITE, invalidpin, number(pin));
 #elif defined(__AVR_ATmega4809__)
   if (!(pin==3 || pin==5 || pin==6 || pin==9 || pin==10)) error(ANALOGWRITE, invalidpin, number(pin));
 #elif defined(__AVR_ATtiny3216__)
@@ -3851,7 +3865,7 @@ void initenv () {
 
 void setup () {
   Serial.begin(9600);
-  #if defined(ARDUINO_AVR_NANO_EVERY)
+  #if defined(ARDUINO_AVR_NANO_EVERY) || defined(ARDUINO_AVR_ATmega4809)
   delay(2500);
   #else
   int start = millis();
