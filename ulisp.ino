@@ -155,10 +155,6 @@ typedef int PinMode;
 #define EEPROMSIZE 256                  /* Bytes */
 #define SYMBOLTABLESIZE BUFFERSIZE      /* Bytes - no long symbols */
 
-#define WORKSPACESIZE 1068-SDSIZE       /* Objects (4*bytes) */
-#define EEPROMSIZE 256                  /* Bytes */
-#define SYMBOLTABLESIZE BUFFERSIZE      /* Bytes - no long symbols */
-
 #elif defined(__AVR_ATmega4809__)
 #define WORKSPACESIZE 1068-SDSIZE       /* Objects (4*bytes) */
 #define EEPROMSIZE 256                  /* Bytes */
