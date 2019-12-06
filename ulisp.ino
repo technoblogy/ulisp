@@ -1,5 +1,5 @@
-/* uLisp AVR Version 3.0 - www.ulisp.com
-   David Johnson-Davies - www.technoblogy.com - 28th November 2019
+/* uLisp AVR Version 3.0a - www.ulisp.com
+   David Johnson-Davies - www.technoblogy.com - 6th December 2019
 
    Licensed under the MIT license: https://opensource.org/licenses/MIT
 */
@@ -190,7 +190,7 @@ char LastChar = 0;
 char LastPrint = 0;
 
 // Flags
-enum flag { PRINTREADABLY, RETURNFLAG, ESCAPE, EXITEDITOR, LIBRARYLOADED };
+enum flag { PRINTREADABLY, RETURNFLAG, ESCAPE, EXITEDITOR, LIBRARYLOADED, NOESC };
 volatile char Flags = 0b00001; // PRINTREADABLY set by default
 
 // Forward references
@@ -3450,7 +3450,7 @@ object *eval (object *form, object *env) {
   // Escape
   if (tstflag(ESCAPE)) { clrflag(ESCAPE); error2(0, PSTR("Escape!"));}
   #if defined (serialmonitor)
-  testescape();
+  if (!tstflag(NOESC)) testescape();
   #endif
   
   if (form == NULL) return nil;
@@ -3776,8 +3776,12 @@ object *nextitem (gfun_t gfun) {
     else if (ch2 == 'O') base = 8;
     else if (ch2 == 'X') base = 16;
     else if (ch == '\'') return nextitem(gfun);
-    else if (ch == '.') return eval(read(gfun), NULL);
-    else error2(0, PSTR("illegal character after #"));
+    else if (ch == '.') {
+      setflag(NOESC);
+      object *result = eval(read(gfun), NULL);
+      clrflag(NOESC);
+      return result;
+    } else error2(0, PSTR("illegal character after #"));
     ch = gfun();
   }
   int isnumber = (digitvalue(ch)<base);
