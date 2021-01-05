@@ -1,5 +1,5 @@
-/* uLisp AVR Version 3.4 - www.ulisp.com
-   David Johnson-Davies - www.technoblogy.com - 5th December 2020
+/* uLisp AVR Version 3.4a - www.ulisp.com
+   David Johnson-Davies - www.technoblogy.com - 5th January 2021
 
    Licensed under the MIT license: https://opensource.org/licenses/MIT
 */
@@ -91,7 +91,7 @@ const char LispLibrary[] PROGMEM = "";
   #define CPU_AVR128DA48
 
 #elif defined(__AVR_AVR128DB48__)
-  #define Serial Serial1
+  #define Serial Serial3
   #define WORKSPACESIZE 2800-SDSIZE       /* Objects (4*bytes) */
   #define EEPROMSIZE 256                  /* Bytes */
   #define SYMBOLTABLESIZE 256             /* Bytes */
@@ -325,7 +325,7 @@ object *myalloc () {
   return temp;
 }
 
-void myfree (object *obj) {
+inline void myfree (object *obj) {
   car(obj) = NULL;
   cdr(obj) = Freelist;
   Freelist = obj;
@@ -363,7 +363,7 @@ object *symbol (symbol_t name) {
 }
 
 object *newsymbol (symbol_t name) {
-  for (int i=WORKSPACESIZE-1; i>=0; i--) {
+  for (int i=0; i<WORKSPACESIZE; i++) {
     object *obj = &Workspace[i];
     if (symbolp(obj) && obj->name == name) return obj;
   }
@@ -1760,6 +1760,7 @@ object *sp_untrace (object *args, object *env) {
 }
 
 object *sp_formillis (object *args, object *env) {
+  if (args == NULL) error2(FORMILLIS, noargument);
   object *param = first(args);
   unsigned long start = millis();
   unsigned long now, total = 0;
@@ -1849,7 +1850,7 @@ object *sp_withspi (object *args, object *env) {
 }
 
 object *sp_withsdcard (object *args, object *env) {
-#if defined(sdcardsupport)
+  #if defined(sdcardsupport)
   object *params = first(args);
   if (params == NULL) error2(WITHSDCARD, nostream);
   object *var = first(params);
@@ -1873,11 +1874,11 @@ object *sp_withsdcard (object *args, object *env) {
   object *result = eval(tf_progn(forms,env), env);
   if (mode >= 1) SDpfile.close(); else SDgfile.close();
   return result;
-#else
+  #else
   (void) args, (void) env;
   error2(WITHSDCARD, PSTR("not supported"));
   return nil;
-#endif
+  #endif
 }
 
 // Tail-recursive forms
@@ -3028,10 +3029,10 @@ object *fn_analogwrite (object *args, object *env) {
 object *fn_dacreference (object *args, object *env) {
   (void) env;
   object *arg = first(args);
-#if defined(CPU_AVR128DA48)
+  #if defined(CPU_AVR128DA48)
   int ref = checkinteger(DACREFERENCE, arg);
   DACReference(ref);
-#endif
+  #endif
   return arg;
 }
 
@@ -4092,7 +4093,7 @@ int glibrary () {
   return (c != 0) ? c : -1; // -1?
 }
 
-void loadfromlibrary (object *env) {   
+void loadfromlibrary (object *env) {
   GlobalStringIndex = 0;
   object *line = read(glibrary);
   while (line != NULL) {
