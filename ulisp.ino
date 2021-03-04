@@ -1,5 +1,5 @@
-/* uLisp AVR Version 3.5 - www.ulisp.com
-   David Johnson-Davies - www.technoblogy.com - 16th February 2021
+/* uLisp AVR Version 3.5a - www.ulisp.com
+   David Johnson-Davies - www.technoblogy.com - 4th March 2021
 
    Licensed under the MIT license: https://opensource.org/licenses/MIT
 */
@@ -117,7 +117,6 @@ const char LispLibrary[] PROGMEM = "";
 #define pop(y)             ((y) = cdr(y))
 
 #define integerp(x)        ((x) != NULL && (x)->type == NUMBER)
-#define floatp(x)          ((x) != NULL && (x)->type == FLOAT)
 #define symbolp(x)         ((x) != NULL && (x)->type == SYMBOL)
 #define stringp(x)         ((x) != NULL && (x)->type == STRING)
 #define characterp(x)      ((x) != NULL && (x)->type == CHARACTER)
@@ -144,7 +143,7 @@ const char LispLibrary[] PROGMEM = "";
 // Constants
 
 const int TRACEMAX = 3; // Number of traced functions
-enum type { ZZERO=0, SYMBOL=2, NUMBER=4, STREAM=6, CHARACTER=8, FLOAT=10, STRING=12, PAIR=14 };  // STRING and PAIR must be last
+enum type { ZZERO=0, SYMBOL=2, NUMBER=4, STREAM=6, CHARACTER=8, STRING=10, PAIR=12 };  // STRING and PAIR must be last
 enum token { UNUSED, BRA, KET, QUO, DOT };
 enum stream { SERIALSTREAM, I2CSTREAM, SPISTREAM, SDSTREAM, STRINGSTREAM };
 
@@ -3005,7 +3004,7 @@ object *fn_analogreadresolution (object *args, object *env) {
   uint8_t res = checkinteger(ANALOGREADRESOLUTION, arg);
   if (res == 10) analogReadResolution(10);
   else if (res == 12) analogReadResolution(12);
-  else error(ANALOGREADRESOLUTION, PSTR("invalid resolution"), res);
+  else error(ANALOGREADRESOLUTION, PSTR("invalid resolution"), arg);
   #else
   error2(ANALOGREADRESOLUTION, PSTR("not supported"));
   #endif
