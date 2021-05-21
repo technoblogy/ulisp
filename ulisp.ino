@@ -830,10 +830,14 @@ object *quote (object *arg) {
 
 #define MAXSYMBOL 64000
 
+#define CH27 '$'
+#define CH28 '*'
+#define CH29 '-'
+
 int toradix40 (char ch) {
   if (ch == 0) return 0;
   if (ch >= '0' && ch <= '9') return ch-'0'+30;
-  if (ch == '$') return 27; if (ch == '*') return 28; if (ch == '-') return 29;
+  if (ch == CH27) return 27; if (ch == CH28) return 28; if (ch == CH29) return 29;
   ch = ch | 0x20;
   if (ch >= 'a' && ch <= 'z') return ch-'a'+1;
   return -1; // Invalid
@@ -841,7 +845,7 @@ int toradix40 (char ch) {
 
 int fromradix40 (int n) {
   if (n >= 1 && n <= 26) return 'a'+n-1;
-  if (n == 27) return '$'; if (n == 28) return '*'; if (n == 29) return '-';
+  if (n == 27) return CH27; if (n == 28) return CH28; if (n == 29) return CH29;
   if (n >= 30 && n <= 39) return '0'+n-30;
   return 0;
 }
