@@ -1,5 +1,5 @@
-/* uLisp AVR Version 4.0 - www.ulisp.com
-   David Johnson-Davies - www.technoblogy.com - 7th July 2021
+/* uLisp AVR Version 4.0a - www.ulisp.com
+   David Johnson-Davies - www.technoblogy.com - 9th July 2021
    
    Licensed under the MIT license: https://opensource.org/licenses/MIT
 */
@@ -1179,7 +1179,7 @@ object *closure (int tc, symbol_t name, object *function, object *args, object *
   return tf_progn(function, *env);
 }
 
-object *apply (symbol_t name, object *function, object *args, object *env) {
+object *apply (builtin_t name, object *function, object *args, object *env) {
   if (symbolp(function)) {
     builtin_t fname = builtin(function->name);
     if ((fname > FUNCTIONS) && (fname < KEYWORDS)) {
@@ -1188,15 +1188,15 @@ object *apply (symbol_t name, object *function, object *args, object *env) {
     } else function = eval(function, env);
   }
   if (consp(function) && isbuiltin(car(function), LAMBDA)) {
-    object *result = closure(0, name, function, args, &env);
+    object *result = closure(0, sym(name), function, args, &env);
     return eval(result, env);
   }
   if (consp(function) && isbuiltin(car(function), CLOSURE)) {
     function = cdr(function);
-    object *result = closure(0, name, function, args, &env);
+    object *result = closure(0, sym(name), function, args, &env);
     return eval(result, env);
   }
-  errorsym(name, PSTR("illegal function"), function);
+  error(name, PSTR("illegal function"), function);
   return NULL;
 }
 
@@ -4357,8 +4357,9 @@ void pradix40 (symbol_t name, pfun_t pfun) {
   uint16_t x = untwist(name);
   for (int d=1600; d>0; d = d/40) {
     uint16_t j = x/d;
-    pfun(fromradix40(j));
-    x = x - j*d;
+    char c = fromradix40(j);
+    if (c == 0) return;
+    pfun(c); x = x - j*d;
   }
 }
 
