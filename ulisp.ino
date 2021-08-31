@@ -1,5 +1,5 @@
-/* uLisp AVR Version 4.0a - www.ulisp.com
-   David Johnson-Davies - www.technoblogy.com - 9th July 2021
+/* uLisp AVR Version 4.0b - www.ulisp.com
+   David Johnson-Davies - www.technoblogy.com - 31st August 2021
    
    Licensed under the MIT license: https://opensource.org/licenses/MIT
 */
@@ -55,7 +55,7 @@ const char LispLibrary[] PROGMEM = "";
 
 #elif defined(__AVR_ATmega1284P__)
   #include "optiboot.h"
-  #define WORKSPACESIZE (2816-SDSIZE)     /* Objects (4*bytes) */
+  #define WORKSPACESIZE (2944-SDSIZE)     /* Objects (4*bytes) */
 //  #define EEPROMSIZE 4096                 /* Bytes */
   #define FLASHWRITESIZE 16384            /* Bytes */
   #define CODESIZE 96                     /* Bytes <= 256 */
@@ -765,7 +765,7 @@ void autorunimage () {
   file.close();
   if (autorun != NULL) {
     loadimage(NULL);
-    apply(0, autorun, NULL, NULL);
+    apply(NIL, autorun, NULL, NULL);
   }
 #elif defined(FLASHWRITESIZE)
   uint32_t addr = 0;
@@ -1700,7 +1700,7 @@ void supersub (object *form, int lm, int super, pfun_t pfun) {
       #if defined(CPU_ATmega4809)
       if (sname == sym(ppspecial[i])) { special = 1; break; }    
       #else
-      if (sname == sym(pgm_read_byte(&ppspecial[i]))) { special = 1; break; }
+      if (sname == sym((builtin_t)pgm_read_byte(&ppspecial[i]))) { special = 1; break; }
       #endif   
     } 
   }
@@ -3466,7 +3466,7 @@ object *fn_pprintall (object *args, object *env) {
       superprint(cons(bsymbol(DEFCODE), cons(var, cdr(val))), 0, pfun);
     #endif
     } else {
-      superprint(cons(bsymbol(DEFVAR), cons(var, cons(quote(val), NULL))), 0, pserial);
+      superprint(cons(bsymbol(DEFVAR), cons(var, cons(quote(val), NULL))), 0, pfun);
     }
     pln(pfun);
     testescape();
@@ -4340,7 +4340,7 @@ void pbuiltin (builtin_t name, pfun_t pfun) {
   #if defined(CPU_ATmega4809)
   PGM_P s = lookup_table[name].string;
   #else
-  PGM_P s = pgm_read_word(&lookup_table[name].string);
+  PGM_P s = (char*)pgm_read_word(&lookup_table[name].string);
   #endif
   while (1) {
     #if defined(CPU_ATmega4809)
