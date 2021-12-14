@@ -1,5 +1,5 @@
-/* uLisp AVR Version 4.0b - www.ulisp.com
-   David Johnson-Davies - www.technoblogy.com - 31st August 2021
+/* uLisp AVR Version 4.1 - www.ulisp.com
+   David Johnson-Davies - www.technoblogy.com - 14th December 2021
    
    Licensed under the MIT license: https://opensource.org/licenses/MIT
 */
@@ -213,21 +213,29 @@ STRINGFN, CONCATENATE, SUBSEQ, READFROMSTRING, PRINCTOSTRING, PRIN1TOSTRING, LOG
 LOGNOT, ASH, LOGBITP, EVAL, GLOBALS, LOCALS, MAKUNBOUND, BREAK, READ, PRIN1, PRINT, PRINC, TERPRI,
 READBYTE, READLINE, WRITEBYTE, WRITESTRING, WRITELINE, RESTARTI2C, GC, ROOM, SAVEIMAGE, LOADIMAGE, CLS,
 PINMODE, DIGITALREAD, DIGITALWRITE, ANALOGREAD, ANALOGREFERENCE, ANALOGREADRESOLUTION, ANALOGWRITE,
-DACREFERENCE, DELAY, MILLIS, SLEEP, NOTE, EDIT, PPRINT, PPRINTALL, FORMAT, REQUIRE, LISTLIBRARY, KEYWORDS,
-
+DACREFERENCE, DELAY, MILLIS, SLEEP, NOTE, REGISTER, EDIT, PPRINT, PPRINTALL, FORMAT, REQUIRE, LISTLIBRARY,
+KEYWORDS, 
 K_LED_BUILTIN, K_HIGH, K_LOW,
 #if defined(CPU_ATmega328P)
-K_INPUT, K_INPUT_PULLUP, K_OUTPUT, K_DEFAULT, K_INTERNAL, K_EXTERNAL,
+K_INPUT, K_INPUT_PULLUP, K_OUTPUT, K_DEFAULT, K_INTERNAL, K_EXTERNAL, K_PORTB, K_DDRB, K_PINB, K_PORTC,
+K_DDRC, K_PINC, K_PORTD, K_DDRD, K_PIND,
 #elif defined(CPU_ATmega1284P)
-K_INPUT, K_INPUT_PULLUP, K_OUTPUT, K_DEFAULT, K_INTERNAL1V1, K_INTERNAL2V56, K_EXTERNAL,
+K_INPUT, K_INPUT_PULLUP, K_OUTPUT, K_DEFAULT, K_INTERNAL1V1, K_INTERNAL2V56, K_EXTERNAL, K_PORTA, K_DDRA,
+K_PINA, K_PORTB, K_DDRB, K_PINB, K_PORTC, K_DDRC, K_PINC, K_PORTD, K_DDRD, K_PIND,
 #elif defined(CPU_ATmega2560)
-K_INPUT, K_INPUT_PULLUP, K_OUTPUT, K_DEFAULT, K_INTERNAL1V1, K_INTERNAL2V56, K_EXTERNAL,
+K_INPUT, K_INPUT_PULLUP, K_OUTPUT, K_DEFAULT, K_INTERNAL1V1, K_INTERNAL2V56, K_EXTERNAL, K_PORTA, K_DDRA,
+K_PINA, K_PORTB, K_DDRB, K_PINB, K_PORTC, K_DDRC, K_PINC, K_PORTD, K_DDRD, K_PIND, K_PORTE, K_DDRE,
+K_PINE, K_PORTF, K_DDRF, K_PINF, K_PORTG, K_DDRG, K_PING, K_PORTJ, K_DDRJ, K_PINJ,
 #elif defined(CPU_ATmega4809)
 K_INPUT, K_INPUT_PULLUP, K_OUTPUT, K_DEFAULT, K_INTERNAL, K_VDD, K_INTERNAL0V55, K_INTERNAL1V1,
-K_INTERNAL1V5, K_INTERNAL2V5, K_INTERNAL4V3, K_EXTERNAL,
+K_INTERNAL1V5, K_INTERNAL2V5, K_INTERNAL4V3, K_EXTERNAL, K_PORTA_DIR, K_PORTA_OUT, K_PORTA_IN,
+K_PORTB_DIR, K_PORTB_OUT, K_PORTB_IN, K_PORTC_DIR, K_PORTC_OUT, K_PORTC_IN, K_PORTD_DIR, K_PORTD_OUT,
+K_PORTD_IN, K_PORTE_DIR, K_PORTE_OUT, K_PORTE_IN, K_PORTF_DIR, K_PORTF_OUT, K_PORTF_IN,
 #elif defined(CPU_AVR128DX48)
 K_INPUT, K_INPUT_PULLUP, K_OUTPUT, K_DEFAULT, K_VDD, K_INTERNAL1V024, K_INTERNAL2V048, K_INTERNAL4V096,
-K_INTERNAL2V5, K_EXTERNAL, K_ADC_DAC0, K_ADC_TEMPERATURE,
+K_INTERNAL2V5, K_EXTERNAL, K_ADC_DAC0, K_ADC_TEMPERATURE, K_PORTA_DIR, K_PORTA_OUT, K_PORTA_IN,
+K_PORTB_DIR, K_PORTB_OUT, K_PORTB_IN, K_PORTC_DIR, K_PORTC_OUT, K_PORTC_IN, K_PORTD_DIR, K_PORTD_OUT,
+K_PORTD_IN, K_PORTE_DIR, K_PORTE_OUT, K_PORTE_IN, K_PORTF_DIR, K_PORTF_OUT, K_PORTF_IN,
 #endif
 USERFUNCTIONS, ENDFUNCTIONS, SET_SIZE = INT_MAX };
 
@@ -310,9 +318,11 @@ const char toofewargs[] PROGMEM = "too few arguments";
 const char noargument[] PROGMEM = "missing argument";
 const char nostream[] PROGMEM = "missing stream argument";
 const char overflow[] PROGMEM = "arithmetic overflow";
+const char divisionbyzero[] PROGMEM = "division by zero";
 const char indexnegative[] PROGMEM = "index can't be negative";
 const char invalidarg[] PROGMEM = "invalid argument";
 const char invalidkey[] PROGMEM = "invalid keyword";
+const char illegalclause[] PROGMEM = "illegal clause";
 const char invalidpin[] PROGMEM = "invalid pin";
 const char oddargs[] PROGMEM = "odd number of arguments";
 const char indexrange[] PROGMEM = "index out of range";
@@ -1078,11 +1088,11 @@ void pstr (char c) {
 object *lispstring (char *s) {
   object *obj = newstring();
   object *tail = obj;
-  char ch = *s++;
-  while (ch) {
+  while(1) {
+    char ch = *s++;
+    if (ch == 0) break;
     if (ch == '\\') ch = *s++;
     buildstring(ch, &tail);
-    ch = *s++;
   }
   return obj;
 }
@@ -2292,7 +2302,7 @@ object *tf_progn (object *args, object *env) {
 }
 
 object *tf_if (object *args, object *env) {
-  if (args == NULL || cdr(args) == NULL) error2(IF, PSTR("missing argument(s)"));
+  if (args == NULL || cdr(args) == NULL) error2(IF, toofewargs);
   if (eval(first(args), env) != nil) return second(args);
   args = cddr(args);
   return (args != NULL) ? first(args) : nil;
@@ -2301,7 +2311,7 @@ object *tf_if (object *args, object *env) {
 object *tf_cond (object *args, object *env) {
   while (args != NULL) {
     object *clause = first(args);
-    if (!consp(clause)) error(COND, PSTR("illegal clause"), clause);
+    if (!consp(clause)) error(COND, illegalclause, clause);
     object *test = eval(first(clause), env);
     object *forms = cdr(clause);
     if (test != nil) {
@@ -2329,7 +2339,7 @@ object *tf_case (object *args, object *env) {
   args = cdr(args);
   while (args != NULL) {
     object *clause = first(args);
-    if (!consp(clause)) error(CASE, PSTR("illegal clause"), clause);
+    if (!consp(clause)) error(CASE, illegalclause, clause);
     object *key = car(clause);
     object *forms = cdr(clause);
     if (consp(key)) {
@@ -2502,7 +2512,7 @@ object *fn_length (object *args, object *env) {
   (void) env;
   object *arg = first(args);
   if (listp(arg)) return number(listlength(LENGTH, arg));
-  if (!stringp(arg)) error(LENGTH, PSTR("argument is not a list or string"), arg);
+  if (!stringp(arg)) error(LENGTH, invalidarg, arg);
   return number(stringlength(arg));
 }
 
@@ -2731,7 +2741,7 @@ object *fn_divide (object *args, object *env) {
   args = cdr(args);
   while (args != NULL) {
     int arg = checkinteger(DIVIDE, car(args));
-    if (arg == 0) error2(DIVIDE, PSTR("division by zero"));
+    if (arg == 0) error2(DIVIDE, divisionbyzero);
     #if defined(checkoverflow)
     if ((result == INT_MIN) && (arg == -1)) error2(DIVIDE, overflow);
     #endif
@@ -2745,7 +2755,7 @@ object *fn_mod (object *args, object *env) {
   (void) env;
   int arg1 = checkinteger(MOD, first(args));
   int arg2 = checkinteger(MOD, second(args));
-  if (arg2 == 0) error2(MOD, PSTR("division by zero"));
+  if (arg2 == 0) error2(MOD, divisionbyzero);
   int r = arg1 % arg2;
   if ((arg1<0) != (arg2<0)) r = r + arg2;
   return number(r);
@@ -3411,6 +3421,17 @@ object *fn_note (object *args, object *env) {
   return nil;
 }
 
+object *fn_register (object *args, object *env) {
+  (void) env;
+  object *arg = first(args);
+  int addr;
+  if (keywordp(arg)) addr = checkkeyword(REGISTER, arg);
+  else addr = checkinteger(REGISTER, first(args));
+  if (cdr(args) == NULL) return number(*(volatile uint8_t *)addr);
+  (*(volatile uint8_t *)addr) = checkinteger(REGISTER, second(args));
+  return second(args);
+}
+
 // Tree Editor
 
 object *fn_edit (object *args, object *env) {
@@ -3768,70 +3789,152 @@ const char string159[] PROGMEM = "delay";
 const char string160[] PROGMEM = "millis";
 const char string161[] PROGMEM = "sleep";
 const char string162[] PROGMEM = "note";
-const char string163[] PROGMEM = "edit";
-const char string164[] PROGMEM = "pprint";
-const char string165[] PROGMEM = "pprintall";
-const char string166[] PROGMEM = "format";
-const char string167[] PROGMEM = "require";
-const char string168[] PROGMEM = "list-library";
-const char string169[] PROGMEM = "";
-const char string170[] PROGMEM = ":led-builtin";
-const char string171[] PROGMEM = ":high";
-const char string172[] PROGMEM = ":low";
+const char string163[] PROGMEM = "register";
+const char string164[] PROGMEM = "edit";
+const char string165[] PROGMEM = "pprint";
+const char string166[] PROGMEM = "pprintall";
+const char string167[] PROGMEM = "format";
+const char string168[] PROGMEM = "require";
+const char string169[] PROGMEM = "list-library";
+const char string170[] PROGMEM = "";
+const char string171[] PROGMEM = ":led-builtin";
+const char string172[] PROGMEM = ":high";
+const char string173[] PROGMEM = ":low";
 #if defined(CPU_ATmega328P)
-const char string173[] PROGMEM = ":input";
-const char string174[] PROGMEM = ":input-pullup";
-const char string175[] PROGMEM = ":output";
-const char string176[] PROGMEM = ":default";
-const char string177[] PROGMEM = ":internal";
-const char string178[] PROGMEM = ":external";
-const char string179[] PROGMEM = "";
+const char string174[] PROGMEM = ":input";
+const char string175[] PROGMEM = ":input-pullup";
+const char string176[] PROGMEM = ":output";
+const char string177[] PROGMEM = ":default";
+const char string178[] PROGMEM = ":internal";
+const char string179[] PROGMEM = ":external";
+const char string180[] PROGMEM = ":portb";
+const char string181[] PROGMEM = ":ddrb";
+const char string182[] PROGMEM = ":pinb";
+const char string183[] PROGMEM = ":portc";
+const char string184[] PROGMEM = ":ddrc";
+const char string185[] PROGMEM = ":pinc";
+const char string186[] PROGMEM = ":portd";
+const char string187[] PROGMEM = ":ddrd";
+const char string188[] PROGMEM = ":pind";
+const char string189[] PROGMEM = "";
 #elif defined(CPU_ATmega1284P)
-const char string173[] PROGMEM = ":input";
-const char string174[] PROGMEM = ":input-pullup";
-const char string175[] PROGMEM = ":output";
-const char string176[] PROGMEM = ":default";
-const char string177[] PROGMEM = ":internal1v1";
-const char string178[] PROGMEM = ":internal2v56";
-const char string179[] PROGMEM = ":external";
-const char string180[] PROGMEM = "";
+const char string174[] PROGMEM = ":input";
+const char string175[] PROGMEM = ":input-pullup";
+const char string176[] PROGMEM = ":output";
+const char string177[] PROGMEM = ":default";
+const char string178[] PROGMEM = ":internal1v1";
+const char string179[] PROGMEM = ":internal2v56";
+const char string180[] PROGMEM = ":external";
+const char string181[] PROGMEM = ":porta";
+const char string182[] PROGMEM = ":ddra";
+const char string183[] PROGMEM = ":pina";
+const char string184[] PROGMEM = ":portb";
+const char string185[] PROGMEM = ":ddrb";
+const char string186[] PROGMEM = ":pinb";
+const char string187[] PROGMEM = ":portc";
+const char string188[] PROGMEM = ":ddrc";
+const char string189[] PROGMEM = ":pinc";
+const char string190[] PROGMEM = ":portd";
+const char string191[] PROGMEM = ":ddrd";
+const char string192[] PROGMEM = ":pind";
+const char string193[] PROGMEM = "";
 #elif defined(CPU_ATmega2560)
-const char string173[] PROGMEM = ":input";
-const char string174[] PROGMEM = ":input-pullup";
-const char string175[] PROGMEM = ":output";
-const char string176[] PROGMEM = ":default";
-const char string177[] PROGMEM = ":internal1v1";
-const char string178[] PROGMEM = ":internal2v56";
-const char string179[] PROGMEM = ":external";
-const char string180[] PROGMEM = "";
+const char string174[] PROGMEM = ":input";
+const char string175[] PROGMEM = ":input-pullup";
+const char string176[] PROGMEM = ":output";
+const char string177[] PROGMEM = ":default";
+const char string178[] PROGMEM = ":internal1v1";
+const char string179[] PROGMEM = ":internal2v56";
+const char string180[] PROGMEM = ":external";
+const char string181[] PROGMEM = ":porta";
+const char string182[] PROGMEM = ":ddra";
+const char string183[] PROGMEM = ":pina";
+const char string184[] PROGMEM = ":portb";
+const char string185[] PROGMEM = ":ddrb";
+const char string186[] PROGMEM = ":pinb";
+const char string187[] PROGMEM = ":portc";
+const char string188[] PROGMEM = ":ddrc";
+const char string189[] PROGMEM = ":pinc";
+const char string190[] PROGMEM = ":portd";
+const char string191[] PROGMEM = ":ddrd";
+const char string192[] PROGMEM = ":pind";
+const char string193[] PROGMEM = ":porte";
+const char string194[] PROGMEM = ":ddre";
+const char string195[] PROGMEM = ":pine";
+const char string196[] PROGMEM = ":portf";
+const char string197[] PROGMEM = ":ddrf";
+const char string198[] PROGMEM = ":pinf";
+const char string199[] PROGMEM = ":portg";
+const char string200[] PROGMEM = ":ddrg";
+const char string201[] PROGMEM = ":ping";
+const char string202[] PROGMEM = ":portj";
+const char string203[] PROGMEM = ":ddrj";
+const char string204[] PROGMEM = ":pinj";
+const char string205[] PROGMEM = "";
 #elif defined(CPU_ATmega4809)
-const char string173[] PROGMEM = ":input";
-const char string174[] PROGMEM = ":input-pullup";
-const char string175[] PROGMEM = ":output";
-const char string176[] PROGMEM = ":default";
-const char string177[] PROGMEM = ":internal";
-const char string178[] PROGMEM = ":vdd";
-const char string179[] PROGMEM = ":internal0v55";
-const char string180[] PROGMEM = ":internal1v1";
-const char string181[] PROGMEM = ":internal1v5";
-const char string182[] PROGMEM = ":internal2v5";
-const char string183[] PROGMEM = ":internal4v3";
-const char string184[] PROGMEM = ":external";
-const char string185[] PROGMEM = "";
+const char string174[] PROGMEM = ":input";
+const char string175[] PROGMEM = ":input-pullup";
+const char string176[] PROGMEM = ":output";
+const char string177[] PROGMEM = ":default";
+const char string178[] PROGMEM = ":internal";
+const char string179[] PROGMEM = ":vdd";
+const char string180[] PROGMEM = ":internal0v55";
+const char string181[] PROGMEM = ":internal1v1";
+const char string182[] PROGMEM = ":internal1v5";
+const char string183[] PROGMEM = ":internal2v5";
+const char string184[] PROGMEM = ":internal4v3";
+const char string185[] PROGMEM = ":external";
+const char string186[] PROGMEM = ":porta-dir";
+const char string187[] PROGMEM = ":porta-out";
+const char string188[] PROGMEM = ":porta-in";
+const char string189[] PROGMEM = ":portb-dir";
+const char string190[] PROGMEM = ":portb-out";
+const char string191[] PROGMEM = ":portb-in";
+const char string192[] PROGMEM = ":portc-dir";
+const char string193[] PROGMEM = ":portc-out";
+const char string194[] PROGMEM = ":portc-in";
+const char string195[] PROGMEM = ":portd-dir";
+const char string196[] PROGMEM = ":portd-out";
+const char string197[] PROGMEM = ":portd-in";
+const char string198[] PROGMEM = ":porte-dir";
+const char string199[] PROGMEM = ":porte-out";
+const char string200[] PROGMEM = ":porte-in";
+const char string201[] PROGMEM = ":portf-dir";
+const char string202[] PROGMEM = ":portf-out";
+const char string203[] PROGMEM = ":portf-in";
+const char string204[] PROGMEM = "";
 #elif defined(CPU_AVR128DX48)
-const char string173[] PROGMEM = ":input";
-const char string174[] PROGMEM = ":input-pullup";
-const char string175[] PROGMEM = ":output";
-const char string176[] PROGMEM = ":default";
-const char string177[] PROGMEM = ":vdd";
-const char string178[] PROGMEM = ":internal1v024";
-const char string179[] PROGMEM = ":internal2v048";
-const char string180[] PROGMEM = ":internal4v096";
-const char string181[] PROGMEM = ":internal2v5";
-const char string182[] PROGMEM = ":external";
-const char string183[] PROGMEM = ":adc-dac0";
-const char string184[] PROGMEM = ":adc-temperature";
-const char string185[] PROGMEM = "";
+const char string174[] PROGMEM = ":input";
+const char string175[] PROGMEM = ":input-pullup";
+const char string176[] PROGMEM = ":output";
+const char string177[] PROGMEM = ":default";
+const char string178[] PROGMEM = ":vdd";
+const char string179[] PROGMEM = ":internal1v024";
+const char string180[] PROGMEM = ":internal2v048";
+const char string181[] PROGMEM = ":internal4v096";
+const char string182[] PROGMEM = ":internal2v5";
+const char string183[] PROGMEM = ":external";
+const char string184[] PROGMEM = ":adc-dac0";
+const char string185[] PROGMEM = ":adc-temperature";
+const char string186[] PROGMEM = ":porta-dir";
+const char string187[] PROGMEM = ":porta-out";
+const char string188[] PROGMEM = ":porta-in";
+const char string189[] PROGMEM = ":portb-dir";
+const char string190[] PROGMEM = ":portb-out";
+const char string191[] PROGMEM = ":portb-in";
+const char string192[] PROGMEM = ":portc-dir";
+const char string193[] PROGMEM = ":portc-out";
+const char string194[] PROGMEM = ":portc-in";
+const char string195[] PROGMEM = ":portd-dir";
+const char string196[] PROGMEM = ":portd-out";
+const char string197[] PROGMEM = ":portd-in";
+const char string198[] PROGMEM = ":porte-dir";
+const char string199[] PROGMEM = ":porte-out";
+const char string200[] PROGMEM = ":porte-in";
+const char string201[] PROGMEM = ":portf-dir";
+const char string202[] PROGMEM = ":portf-out";
+const char string203[] PROGMEM = ":portf-in";
+const char string204[] PROGMEM = "";
 #endif
 
 // Insert your own function names here
@@ -4001,70 +4104,152 @@ const tbl_entry_t lookup_table[] PROGMEM = {
   { string160, fn_millis, 0x00 },
   { string161, fn_sleep, 0x11 },
   { string162, fn_note, 0x03 },
-  { string163, fn_edit, 0x11 },
-  { string164, fn_pprint, 0x12 },
-  { string165, fn_pprintall, 0x01 },
-  { string166, fn_format, 0x2F },
-  { string167, fn_require, 0x11 },
-  { string168, fn_listlibrary, 0x00 },
-  { string169, NULL, 0x00 },
-  { string170, (fn_ptr_type)LED_BUILTIN, 0 },
-  { string171, (fn_ptr_type)HIGH, DIGITALWRITE },
-  { string172, (fn_ptr_type)LOW, DIGITALWRITE },
+  { string163, fn_register, 0x12 },
+  { string164, fn_edit, 0x11 },
+  { string165, fn_pprint, 0x12 },
+  { string166, fn_pprintall, 0x01 },
+  { string167, fn_format, 0x2F },
+  { string168, fn_require, 0x11 },
+  { string169, fn_listlibrary, 0x00 },
+  { string170, NULL, 0x00 },
+  { string171, (fn_ptr_type)LED_BUILTIN, 0 },
+  { string172, (fn_ptr_type)HIGH, DIGITALWRITE },
+  { string173, (fn_ptr_type)LOW, DIGITALWRITE },
 #if defined(CPU_ATmega328P)
-  { string173, (fn_ptr_type)INPUT, PINMODE },
-  { string174, (fn_ptr_type)INPUT_PULLUP, PINMODE },
-  { string175, (fn_ptr_type)OUTPUT, PINMODE },
-  { string176, (fn_ptr_type)DEFAULT, ANALOGREFERENCE },
-  { string177, (fn_ptr_type)INTERNAL, ANALOGREFERENCE },
-  { string178, (fn_ptr_type)EXTERNAL, ANALOGREFERENCE },
-  { string179, NULL, 0x00 },
+  { string174, (fn_ptr_type)INPUT, PINMODE },
+  { string175, (fn_ptr_type)INPUT_PULLUP, PINMODE },
+  { string176, (fn_ptr_type)OUTPUT, PINMODE },
+  { string177, (fn_ptr_type)DEFAULT, ANALOGREFERENCE },
+  { string178, (fn_ptr_type)INTERNAL, ANALOGREFERENCE },
+  { string179, (fn_ptr_type)EXTERNAL, ANALOGREFERENCE },
+  { string180, (fn_ptr_type)&PORTB, REGISTER },
+  { string181, (fn_ptr_type)&DDRB, REGISTER },
+  { string182, (fn_ptr_type)&PINB, REGISTER },
+  { string183, (fn_ptr_type)&PORTC, REGISTER },
+  { string184, (fn_ptr_type)&DDRC, REGISTER },
+  { string185, (fn_ptr_type)&PINC, REGISTER },
+  { string186, (fn_ptr_type)&PORTD, REGISTER },
+  { string187, (fn_ptr_type)&DDRD, REGISTER },
+  { string188, (fn_ptr_type)&PIND, REGISTER },
+  { string189, NULL, 0x00 },
 #elif defined(CPU_ATmega1284P)
-  { string173, (fn_ptr_type)INPUT, PINMODE },
-  { string174, (fn_ptr_type)INPUT_PULLUP, PINMODE },
-  { string175, (fn_ptr_type)OUTPUT, PINMODE },
-  { string176, (fn_ptr_type)DEFAULT, ANALOGREFERENCE },
-  { string177, (fn_ptr_type)INTERNAL1V1, ANALOGREFERENCE },
-  { string178, (fn_ptr_type)INTERNAL2V56, ANALOGREFERENCE },
-  { string179, (fn_ptr_type)EXTERNAL, ANALOGREFERENCE },
-  { string180, NULL, 0x00 },
+  { string174, (fn_ptr_type)INPUT, PINMODE },
+  { string175, (fn_ptr_type)INPUT_PULLUP, PINMODE },
+  { string176, (fn_ptr_type)OUTPUT, PINMODE },
+  { string177, (fn_ptr_type)DEFAULT, ANALOGREFERENCE },
+  { string178, (fn_ptr_type)INTERNAL1V1, ANALOGREFERENCE },
+  { string179, (fn_ptr_type)INTERNAL2V56, ANALOGREFERENCE },
+  { string180, (fn_ptr_type)EXTERNAL, ANALOGREFERENCE },
+  { string181, (fn_ptr_type)&PORTA, REGISTER },
+  { string182, (fn_ptr_type)&DDRA, REGISTER },
+  { string183, (fn_ptr_type)&PINA, REGISTER },
+  { string184, (fn_ptr_type)&PORTB, REGISTER },
+  { string185, (fn_ptr_type)&DDRB, REGISTER },
+  { string186, (fn_ptr_type)&PINB, REGISTER },
+  { string187, (fn_ptr_type)&PORTC, REGISTER },
+  { string188, (fn_ptr_type)&DDRC, REGISTER },
+  { string189, (fn_ptr_type)&PINC, REGISTER },
+  { string190, (fn_ptr_type)&PORTD, REGISTER },
+  { string191, (fn_ptr_type)&DDRD, REGISTER },
+  { string192, (fn_ptr_type)&PIND, REGISTER },
+  { string193, NULL, 0x00 },
 #elif defined(CPU_ATmega2560)
-  { string173, (fn_ptr_type)INPUT, PINMODE },
-  { string174, (fn_ptr_type)INPUT_PULLUP, PINMODE },
-  { string175, (fn_ptr_type)OUTPUT, PINMODE },
-  { string176, (fn_ptr_type)DEFAULT, ANALOGREFERENCE },
-  { string177, (fn_ptr_type)INTERNAL1V1, ANALOGREFERENCE },
-  { string178, (fn_ptr_type)INTERNAL2V56, ANALOGREFERENCE },
-  { string179, (fn_ptr_type)EXTERNAL, ANALOGREFERENCE },
-  { string180, NULL, 0x00 },
+  { string174, (fn_ptr_type)INPUT, PINMODE },
+  { string175, (fn_ptr_type)INPUT_PULLUP, PINMODE },
+  { string176, (fn_ptr_type)OUTPUT, PINMODE },
+  { string177, (fn_ptr_type)DEFAULT, ANALOGREFERENCE },
+  { string178, (fn_ptr_type)INTERNAL1V1, ANALOGREFERENCE },
+  { string179, (fn_ptr_type)INTERNAL2V56, ANALOGREFERENCE },
+  { string180, (fn_ptr_type)EXTERNAL, ANALOGREFERENCE },
+  { string181, (fn_ptr_type)&PORTA, REGISTER },
+  { string182, (fn_ptr_type)&DDRA, REGISTER },
+  { string183, (fn_ptr_type)&PINA, REGISTER },
+  { string184, (fn_ptr_type)&PORTB, REGISTER },
+  { string185, (fn_ptr_type)&DDRB, REGISTER },
+  { string186, (fn_ptr_type)&PINB, REGISTER },
+  { string187, (fn_ptr_type)&PORTC, REGISTER },
+  { string188, (fn_ptr_type)&DDRC, REGISTER },
+  { string189, (fn_ptr_type)&PINC, REGISTER },
+  { string190, (fn_ptr_type)&PORTD, REGISTER },
+  { string191, (fn_ptr_type)&DDRD, REGISTER },
+  { string192, (fn_ptr_type)&PIND, REGISTER },
+  { string193, (fn_ptr_type)&PORTE, REGISTER },
+  { string194, (fn_ptr_type)&DDRE, REGISTER },
+  { string195, (fn_ptr_type)&PINE, REGISTER },
+  { string196, (fn_ptr_type)&PORTF, REGISTER },
+  { string197, (fn_ptr_type)&DDRF, REGISTER },
+  { string198, (fn_ptr_type)&PINF, REGISTER },
+  { string199, (fn_ptr_type)&PORTG, REGISTER },
+  { string200, (fn_ptr_type)&DDRG, REGISTER },
+  { string201, (fn_ptr_type)&PING, REGISTER },
+  { string202, (fn_ptr_type)&PORTJ, REGISTER },
+  { string203, (fn_ptr_type)&DDRJ, REGISTER },
+  { string204, (fn_ptr_type)&PINJ, REGISTER },
+  { string205, NULL, 0x00 },
 #elif defined(CPU_ATmega4809)
-  { string173, (fn_ptr_type)INPUT, PINMODE },
-  { string174, (fn_ptr_type)INPUT_PULLUP, PINMODE },
-  { string175, (fn_ptr_type)OUTPUT, PINMODE },
-  { string176, (fn_ptr_type)DEFAULT, ANALOGREFERENCE },
-  { string177, (fn_ptr_type)INTERNAL, ANALOGREFERENCE },
-  { string178, (fn_ptr_type)VDD, ANALOGREFERENCE },
-  { string179, (fn_ptr_type)INTERNAL0V55, ANALOGREFERENCE },
-  { string180, (fn_ptr_type)INTERNAL1V1, ANALOGREFERENCE },
-  { string181, (fn_ptr_type)INTERNAL1V5, ANALOGREFERENCE },
-  { string182, (fn_ptr_type)INTERNAL2V5, ANALOGREFERENCE },
-  { string183, (fn_ptr_type)INTERNAL4V3, ANALOGREFERENCE },
-  { string184, (fn_ptr_type)EXTERNAL, ANALOGREFERENCE },
-  { string185, NULL, 0x00 },
+  { string174, (fn_ptr_type)INPUT, PINMODE },
+  { string175, (fn_ptr_type)INPUT_PULLUP, PINMODE },
+  { string176, (fn_ptr_type)OUTPUT, PINMODE },
+  { string177, (fn_ptr_type)DEFAULT, ANALOGREFERENCE },
+  { string178, (fn_ptr_type)INTERNAL, ANALOGREFERENCE },
+  { string179, (fn_ptr_type)VDD, ANALOGREFERENCE },
+  { string180, (fn_ptr_type)INTERNAL0V55, ANALOGREFERENCE },
+  { string181, (fn_ptr_type)INTERNAL1V1, ANALOGREFERENCE },
+  { string182, (fn_ptr_type)INTERNAL1V5, ANALOGREFERENCE },
+  { string183, (fn_ptr_type)INTERNAL2V5, ANALOGREFERENCE },
+  { string184, (fn_ptr_type)INTERNAL4V3, ANALOGREFERENCE },
+  { string185, (fn_ptr_type)EXTERNAL, ANALOGREFERENCE },
+  { string186, (fn_ptr_type)&PORTA_DIR, REGISTER },
+  { string187, (fn_ptr_type)&PORTA_OUT, REGISTER },
+  { string188, (fn_ptr_type)&PORTA_IN, REGISTER },
+  { string189, (fn_ptr_type)&PORTB_DIR, REGISTER },
+  { string190, (fn_ptr_type)&PORTB_OUT, REGISTER },
+  { string191, (fn_ptr_type)&PORTB_IN, REGISTER },
+  { string192, (fn_ptr_type)&PORTC_DIR, REGISTER },
+  { string193, (fn_ptr_type)&PORTC_OUT, REGISTER },
+  { string194, (fn_ptr_type)&PORTC_IN, REGISTER },
+  { string195, (fn_ptr_type)&PORTD_DIR, REGISTER },
+  { string196, (fn_ptr_type)&PORTD_OUT, REGISTER },
+  { string197, (fn_ptr_type)&PORTD_IN, REGISTER },
+  { string198, (fn_ptr_type)&PORTE_DIR, REGISTER },
+  { string199, (fn_ptr_type)&PORTE_OUT, REGISTER },
+  { string200, (fn_ptr_type)&PORTE_IN, REGISTER },
+  { string201, (fn_ptr_type)&PORTF_DIR, REGISTER },
+  { string202, (fn_ptr_type)&PORTF_OUT, REGISTER },
+  { string203, (fn_ptr_type)&PORTF_IN, REGISTER },
+  { string204, NULL, 0x00 },
 #elif defined(CPU_AVR128DX48)
-  { string173, (fn_ptr_type)INPUT, PINMODE },
-  { string174, (fn_ptr_type)INPUT_PULLUP, PINMODE },
-  { string175, (fn_ptr_type)OUTPUT, PINMODE },
-  { string176, (fn_ptr_type)DEFAULT, ANALOGREFERENCE },
-  { string177, (fn_ptr_type)VDD, ANALOGREFERENCE },
-  { string178, (fn_ptr_type)INTERNAL1V024, ANALOGREFERENCE },
-  { string179, (fn_ptr_type)INTERNAL2V048, ANALOGREFERENCE },
-  { string180, (fn_ptr_type)INTERNAL4V096, ANALOGREFERENCE },
-  { string181, (fn_ptr_type)INTERNAL2V5, ANALOGREFERENCE },
-  { string182, (fn_ptr_type)EXTERNAL, ANALOGREFERENCE },
-  { string183, (fn_ptr_type)ADC_DAC0, ANALOGREAD },
-  { string184, (fn_ptr_type)ADC_TEMPERATURE, ANALOGREAD },
-  { string185, NULL, 0x00 },
+  { string174, (fn_ptr_type)INPUT, PINMODE },
+  { string175, (fn_ptr_type)INPUT_PULLUP, PINMODE },
+  { string176, (fn_ptr_type)OUTPUT, PINMODE },
+  { string177, (fn_ptr_type)DEFAULT, ANALOGREFERENCE },
+  { string178, (fn_ptr_type)VDD, ANALOGREFERENCE },
+  { string179, (fn_ptr_type)INTERNAL1V024, ANALOGREFERENCE },
+  { string180, (fn_ptr_type)INTERNAL2V048, ANALOGREFERENCE },
+  { string181, (fn_ptr_type)INTERNAL4V096, ANALOGREFERENCE },
+  { string182, (fn_ptr_type)INTERNAL2V5, ANALOGREFERENCE },
+  { string183, (fn_ptr_type)EXTERNAL, ANALOGREFERENCE },
+  { string184, (fn_ptr_type)ADC_DAC0, ANALOGREAD },
+  { string185, (fn_ptr_type)ADC_TEMPERATURE, ANALOGREAD },
+  { string186, (fn_ptr_type)&PORTA_DIR, REGISTER },
+  { string187, (fn_ptr_type)&PORTA_OUT, REGISTER },
+  { string188, (fn_ptr_type)&PORTA_IN, REGISTER },
+  { string189, (fn_ptr_type)&PORTB_DIR, REGISTER },
+  { string190, (fn_ptr_type)&PORTB_OUT, REGISTER },
+  { string191, (fn_ptr_type)&PORTB_IN, REGISTER },
+  { string192, (fn_ptr_type)&PORTC_DIR, REGISTER },
+  { string193, (fn_ptr_type)&PORTC_OUT, REGISTER },
+  { string194, (fn_ptr_type)&PORTC_IN, REGISTER },
+  { string195, (fn_ptr_type)&PORTD_DIR, REGISTER },
+  { string196, (fn_ptr_type)&PORTD_OUT, REGISTER },
+  { string197, (fn_ptr_type)&PORTD_IN, REGISTER },
+  { string198, (fn_ptr_type)&PORTE_DIR, REGISTER },
+  { string199, (fn_ptr_type)&PORTE_OUT, REGISTER },
+  { string200, (fn_ptr_type)&PORTE_IN, REGISTER },
+  { string201, (fn_ptr_type)&PORTF_DIR, REGISTER },
+  { string202, (fn_ptr_type)&PORTF_OUT, REGISTER },
+  { string203, (fn_ptr_type)&PORTF_IN, REGISTER },
+  { string204, NULL, 0x00 },
 #endif
 
 // Insert your own table entries here
@@ -4762,7 +4947,7 @@ void setup () {
   initworkspace();
   initenv();
   initsleep();
-  pfstring(PSTR("uLisp 4.0 "), pserial); pln(pserial);
+  pfstring(PSTR("uLisp 4.1 "), pserial); pln(pserial);
 }
 
 // Read/Evaluate/Print loop
