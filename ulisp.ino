@@ -1,5 +1,5 @@
-/* uLisp AVR Version 4.1 - www.ulisp.com
-   David Johnson-Davies - www.technoblogy.com - 14th December 2021
+/* uLisp AVR Version 4.1a - www.ulisp.com
+   David Johnson-Davies - www.technoblogy.com - 30th December 2021
    
    Licensed under the MIT license: https://opensource.org/licenses/MIT
 */
@@ -3501,7 +3501,7 @@ object *fn_pprintall (object *args, object *env) {
 void formaterr (object *formatstr, PGM_P string, uint8_t p) {
   pln(pserial); indent(4, ' ', pserial); printstring(formatstr, pserial); pln(pserial);
   indent(p+5, ' ', pserial); pserial('^');
-  errorsub(FORMAT, string);
+  error2(FORMAT, string);
   pln(pserial);
   GCStack = NULL;
   longjmp(exception, 1);
