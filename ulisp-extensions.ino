@@ -1,7 +1,7 @@
 /*
  User Extensions
 */
-  
+
 // Definitions
 object *fn_now (object *args, object *env) {
   (void) env;
