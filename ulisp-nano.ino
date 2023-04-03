@@ -1,6 +1,6 @@
-/* uLisp AVR-Nano Release 4.4 - www.ulisp.com
-   David Johnson-Davies - www.technoblogy.com - 21st March 2023
-
+/* uLisp AVR-Nano Release 4.4b - www.ulisp.com
+   David Johnson-Davies - www.technoblogy.com - 3rd April 2023
+   
    Licensed under the MIT license: https://opensource.org/licenses/MIT
 */
 
@@ -852,7 +852,7 @@ int8_t toradix40 (char ch) {
 }
 
 char fromradix40 (char n) {
-  if (n >= 1 && n <= 9) return '0'+n-1;
+  if (n >= 1 && n <= 10) return '0'+n-1;
   if (n >= 11 && n <= 36) return 'a'+n-11;
   if (n == 37) return '-'; if (n == 38) return '*'; if (n == 39) return '$';
   return 0;
@@ -938,6 +938,16 @@ int listlength (object *list) {
     length++;
   }
   return length;
+}
+
+object *checkarguments (object *args, uint8_t min, uint8_t max) {
+  if (args == NULL) error2(noargument);
+  args = first(args);
+  if (!listp(args)) error(notalist, args);
+  uint8_t length = listlength(args);
+  if (length < min) error(toofewargs, args);
+  if (length > max) error(toomanyargs, args);
+  return args;
 }
 
 // Mathematical helper functions
@@ -1968,8 +1978,7 @@ object *sp_setf (object *args, object *env) {
 // Other special forms
 
 object *sp_dolist (object *args, object *env) {
-  if (args == NULL || listlength(first(args)) < 2) error2(noargument);
-  object *params = first(args);
+  object *params = checkarguments(args, 2, 3);
   object *var = first(params);
   object *list = eval(second(params), env);
   push(list, GCStack); // Don't GC the list
@@ -1999,8 +2008,7 @@ object *sp_dolist (object *args, object *env) {
 }
 
 object *sp_dotimes (object *args, object *env) {
-  if (args == NULL || listlength(first(args)) < 2) error2(noargument);
-  object *params = first(args);
+  object *params = checkarguments(args, 2, 3);
   object *var = first(params);
   int count = checkinteger(eval(second(params), env));
   int index = 0;
@@ -2063,8 +2071,7 @@ object *sp_untrace (object *args, object *env) {
 }
 
 object *sp_formillis (object *args, object *env) {
-  if (args == NULL) error2(noargument);
-  object *param = first(args);
+  object *param = checkarguments(args, 0, 1);
   unsigned long start = millis();
   unsigned long now, total = 0;
   if (param != NULL) total = checkinteger(eval(first(param), env));
@@ -2096,9 +2103,7 @@ object *sp_time (object *args, object *env) {
 }
 
 object *sp_withoutputtostring (object *args, object *env) {
-  if (args == NULL) error2(noargument);
-  object *params = first(args);
-  if (params == NULL) error2(nostream);
+  object *params = checkarguments(args, 1, 1);
   object *var = first(params);
   object *pair = cons(var, stream(STRINGSTREAM, 0));
   push(pair,env);
@@ -2111,8 +2116,7 @@ object *sp_withoutputtostring (object *args, object *env) {
 }
 
 object *sp_withserial (object *args, object *env) {
-  object *params = first(args);
-  if (params == NULL) error2(nostream);
+  object *params = checkarguments(args, 2, 3);
   object *var = first(params);
   int address = checkinteger(eval(second(params), env));
   params = cddr(params);
@@ -2128,8 +2132,7 @@ object *sp_withserial (object *args, object *env) {
 }
 
 object *sp_withi2c (object *args, object *env) {
-  object *params = first(args);
-  if (params == NULL) error2(nostream);
+  object *params = checkarguments(args, 2, 4);
   object *var = first(params);
   int address = checkinteger(eval(second(params), env));
   params = cddr(params);
@@ -2151,8 +2154,7 @@ object *sp_withi2c (object *args, object *env) {
 }
 
 object *sp_withspi (object *args, object *env) {
-  object *params = first(args);
-  if (params == NULL) error2(nostream);
+  object *params = checkarguments(args, 2, 6);
   object *var = first(params);
   params = cdr(params);
   if (params == NULL) error2(nostream);
@@ -2188,8 +2190,7 @@ object *sp_withspi (object *args, object *env) {
 
 object *sp_withsdcard (object *args, object *env) {
   #if defined(sdcardsupport)
-  object *params = first(args);
-  if (params == NULL) error2(nostream);
+  object *params = checkarguments(args, 2, 3);
   object *var = first(params);
   params = cdr(params);
   if (params == NULL) error2(PSTR("no filename specified"));
@@ -4142,7 +4143,7 @@ object *eval (object *form, object *env) {
   EVAL:
   // Enough space?
   //Serial.println((uint16_t)sp - (uint16_t)__bss_end); // Find best STACKDIFF value
-  if ((uint16_t)sp - (uint16_t)__bss_end < STACKDIFF) { Context = 0; error2(PSTR("stack overflow")); }
+  if ((uint16_t)sp - (uint16_t)__bss_end < STACKDIFF) { Context = NIL; error2(PSTR("stack overflow")); }
   if (Freespace <= WORKSPACESIZE>>4) gc(form, env);      // GC when 1/16 of workspace left
   // Escape
   if (tstflag(ESCAPE)) { clrflag(ESCAPE); error2(PSTR("escape!"));}
@@ -4159,6 +4160,7 @@ object *eval (object *form, object *env) {
     pair = value(name, GlobalEnv);
     if (pair != NULL) return cdr(pair);
     else if (builtinp(name)) return form;
+    Context = NIL;
     error(PSTR("undefined"), form);
   }
 
@@ -4721,11 +4723,11 @@ object *nextitem (gfun_t gfun) {
     if (index == 3) return character((buffer[0]*10+buffer[1])*10+buffer[2]-5328);
     error2(PSTR("unknown character"));
   }
-  
+
   builtin_t x = lookupbuiltin(buffer);
   if (x == NIL) return nil;
   if (x != ENDFUNCTIONS) return bsymbol(x);
-  else if ((index <= 3) && valid40(buffer)) return intern(twist(pack40(buffer)));
+  if (index <= 3 && valid40(buffer)) return intern(twist(pack40(buffer)));
   buffer[index+1] = '\0'; // For internlong
   return internlong(buffer);
 }
@@ -4771,6 +4773,7 @@ void initenv () {
   tee = bsymbol(TEE);
 }
 
+// Entry point from the Arduino IDE
 void setup () {
   Serial.begin(9600);
   int start = millis();
@@ -4778,7 +4781,7 @@ void setup () {
   initworkspace();
   initenv();
   initsleep();
-  pfstring(PSTR("uLisp 4.4 "), pserial); pln(pserial);
+  pfstring(PSTR("uLisp 4.4b "), pserial); pln(pserial);
 }
 
 // Read/Evaluate/Print loop
@@ -4795,7 +4798,7 @@ void repl (object *env) {
       pint(BreakLevel, pserial);
     }
     pserial('>'); pserial(' ');
-    Context = 0;
+    Context = NIL;
     object *line = read(gserial);
     if (BreakLevel && line == nil) { pln(pserial); return; }
     if (line == (object *)KET) error2(PSTR("unmatched right bracket"));
