@@ -1,5 +1,5 @@
-/* uLisp AVR-Nano Release 4.6 - www.ulisp.com
-   David Johnson-Davies - www.technoblogy.com - 13th June 2024
+/* uLisp AVR-Nano Release 4.7 - www.ulisp.com
+   David Johnson-Davies - www.technoblogy.com - 5th November 2024
    
    Licensed under the MIT license: https://opensource.org/licenses/MIT
 */
@@ -47,21 +47,6 @@ const char LispLibrary[] PROGMEM = "";
   #define STACKDIFF 1
   #define CPU_ATmega328P
 
-#elif defined(ARDUINO_AVR_MEGA2560)
-  #define WORKSPACESIZE (1344-SDSIZE)     /* Objects (4*bytes) */
-  #define EEPROMSIZE 4096                 /* Bytes */
-  #define STACKDIFF 320
-  #define CPU_ATmega2560
-
-#elif defined(__AVR_ATmega1284P__)
-  #include "optiboot.h"
-  #define WORKSPACESIZE (2944-SDSIZE)     /* Objects (4*bytes) */
-//  #define EEPROMSIZE 4096                 /* Bytes */
-  #define FLASHWRITESIZE 16384            /* Bytes */
-  #define CODESIZE 96                     /* Bytes <= 256 */
-  #define STACKDIFF 320
-  #define CPU_ATmega1284P
-
 #elif defined(ARDUINO_AVR_NANO_EVERY)
   #define WORKSPACESIZE (1060-SDSIZE)     /* Objects (4*bytes) */
   #define EEPROMSIZE 256                  /* Bytes */
@@ -81,25 +66,12 @@ const char LispLibrary[] PROGMEM = "";
   #define STACKDIFF 1
   #define CPU_ATtiny3227
 
-#elif defined(__AVR_AVR128DA48__)
+#elif defined(__AVR_AVR64DD28__)
   #include <Flash.h>
-  #define Serial Serial1
-  #define WORKSPACESIZE (2920-SDSIZE)     /* Objects (4*bytes) */
-  #define FLASHWRITESIZE 16384            /* Bytes */
-  #define CODESIZE 96                     /* Bytes <= 512 */
-  #define STACKDIFF 320
-  #define CPU_AVR128DX48
-  #define LED_BUILTIN 20
-
-#elif defined(__AVR_AVR128DB48__)
-  #include <Flash.h>
-  #define Serial Serial3
-  #define WORKSPACESIZE (2920-SDSIZE)     /* Objects (4*bytes) */
-  #define FLASHWRITESIZE 16384            /* Bytes */
-  #define CODESIZE 96                     /* Bytes <= 512 */
-  #define STACKDIFF 320
-  #define CPU_AVR128DX48
-  #define LED_BUILTIN 20
+  #define WORKSPACESIZE (1440-SDSIZE)      /* Objects (4*bytes) */
+  #define FLASHWRITESIZE 6144              /* Bytes */
+  #define STACKDIFF 1
+  #define CPU_AVR64DD28
   
 #else
 #error "Board not supported!"
@@ -134,14 +106,17 @@ const char LispLibrary[] PROGMEM = "";
 #define marked(x)          ((((uintptr_t)(car(x))) & MARKBIT) != 0)
 #define MARKBIT            1
 
-#define setflag(x)         (Flags |= 1<<(x))
-#define clrflag(x)         (Flags &= ~(1<<(x)))
+#define setflag(x)         (Flags = Flags | 1<<(x))
+#define clrflag(x)         (Flags = Flags & ~(1<<(x)))
 #define tstflag(x)         (Flags & 1<<(x))
 
 #define issp(x)            (x == ' ' || x == '\n' || x == '\r' || x == '\t')
-#define isbr(x)            (x == ')' || x == '(' || x == '"' || x == '#')
+#define isbr(x)            (x == ')' || x == '(' || x == '"' || x == '#' || x == '\'')
+#define fntype(x)          (getminmax((uint16_t)(x))>>6)
 #define longsymbolp(x)     (((x)->name & 0x03) == 0)
 #define longnamep(x)       (((x) & 0x03) == 0)
+#define twist(x)           ((uint16_t)((x)<<2) | (((x) & 0xC000)>>14))
+#define untwist(x)         (((x)>>2 & 0x3FFF) | ((x) & 0x03)<<14)
 #define arraysize(x)       (sizeof(x) / sizeof(x[0]))
 #define stringifyX(x)      #x
 #define stringify(x)       stringifyX(x)
@@ -239,20 +214,13 @@ char LastPrint = 0;
 uint16_t RandomSeed;
 
 // Flags
-enum flag { PRINTREADABLY, RETURNFLAG, ESCAPE, EXITEDITOR, LIBRARYLOADED, NOESC, NOECHO };
-volatile uint8_t Flags = 0b00001; // PRINTREADABLY set by default
+enum flag { PRINTREADABLY, RETURNFLAG, ESCAPE, EXITEDITOR, LIBRARYLOADED, NOESC, NOECHO, BACKTRACE };
+typedef uint8_t flags_t;
+volatile flags_t Flags = 1<<PRINTREADABLY; // Set by default
 
 // Forward references
 object *tee;
 void pfstring (PGM_P s, pfun_t pfun);
-
-inline symbol_t twist (builtin_t x) {
-  return (x<<2) | ((x & 0xC000)>>14);
-}
-
-inline builtin_t untwist (symbol_t x) {
-  return (x>>2 & 0x3FFF) | ((x & 0x03)<<14);
-}
 
 // Error handling
 
@@ -318,8 +286,7 @@ void formaterr (object *formatstr, PGM_P string, uint8_t p) {
   indent(p+5, ' ', pserial); pserial('^');
   error2(string);
   pln(pserial);
-  GCStack = NULL;
-  longjmp(exception, 1);
+  errorend();
 }
 
 // Save space as these are used multiple times
@@ -339,6 +306,7 @@ const char indexnegative[] PROGMEM = "index can't be negative";
 const char invalidarg[] PROGMEM = "invalid argument";
 const char invalidkey[] PROGMEM = "invalid keyword";
 const char illegalclause[] PROGMEM = "illegal clause";
+const char illegalfn[] PROGMEM = "illegal function";
 const char invalidpin[] PROGMEM = "invalid pin";
 const char oddargs[] PROGMEM = "odd number of arguments";
 const char indexrange[] PROGMEM = "index out of range";
@@ -588,7 +556,8 @@ void movepointer (object *from, object *to) {
 }
 
 /*
-  compactimage - compacts the image by moving objects to the lowest possible position in the workspace
+  compactimage - Marks all accessible objects. Moves the last marked object down to the first free space gap, correcting
+  pointers by calling movepointer(). Then repeats until there are no more gaps.
 */
 uintptr_t compactimage (object **arg) {
   markobject(tee);
@@ -631,6 +600,14 @@ char *MakeFilename (object *arg, char *buffer) {
 // Save-image and load-image
 
 #if defined(sdcardsupport)
+
+/*
+  SDBegin - a standard call on all platforms to initialise the SD Card interface.
+*/
+void SDBegin() {
+  SD.begin(SDCARD_SS_PIN);
+}
+
 void SDWriteInt (File file, int data) {
   file.write(data & 0xFF); file.write(data>>8 & 0xFF);
 }
@@ -640,36 +617,10 @@ int SDReadInt (File file) {
   return b0 | b1<<8;
 }
 #elif defined(FLASHWRITESIZE)
-#if defined (CPU_ATmega1284P)
-// save-image area is the 16K bytes (64 256-byte pages) from 0x1bc00 to 0x1fc00
-const uint32_t BaseAddress = 0x1bc00;
-uint8_t FlashCheck() {
-  return 0;
-}
-
-void FlashWriteInt (uint32_t *addr, int data) {
-  if (((*addr) & 0xFF) == 0) optiboot_page_erase(BaseAddress + ((*addr) & 0xFF00));
-  optiboot_page_fill(BaseAddress + *addr, data);
-  if (((*addr) & 0xFF) == 0xFE) optiboot_page_write(BaseAddress + ((*addr) & 0xFF00));
-  (*addr)++; (*addr)++;
-}
-
-void FlashEndWrite (uint32_t *addr) {
-  if (((*addr) & 0xFF) != 0) optiboot_page_write((BaseAddress + ((*addr) & 0xFF00)));
-}
-
-uint8_t FlashReadByte (uint32_t *addr) {
-  return pgm_read_byte_far(BaseAddress + (*addr)++);
-}
-
-int FlashReadInt (uint32_t *addr) {
-  int data = pgm_read_word_far(BaseAddress + *addr);
-  (*addr)++; (*addr)++;
-  return data;
-}
-#elif defined (CPU_AVR128DX48) || defined (CPU_AVR64DD28)
-// save-image area is the 16K bytes (32 512-byte pages) from 0x1c000 to 0x20000
-const uint32_t BaseAddress = 0x1c000;
+#if defined (CPU_AVR64DD28)
+// save-image area is the 6144 bytes (12 x 512-byte pages) from 0xE600 to 0xFE00
+// Leave 512 bytes at the top for DxCore
+const uint32_t BaseAddress = 0xE600;
 uint8_t FlashCheck() {
   return Flash.checkWritable();
 }
@@ -705,10 +656,13 @@ int EEPROMReadInt (unsigned int *addr) {
 }
 #endif
 
+/*
+  saveimage - saves an image of the workspace to the persistent storage selected for the platform.
+*/
 unsigned int saveimage (object *arg) {
 #if defined(sdcardsupport)
   unsigned int imagesize = compactimage(&arg);
-  SD.begin(SDCARD_SS_PIN);
+  SDBegin();
   File file;
   if (stringp(arg)) {
     char buffer[BUFFERSIZE];
@@ -783,9 +737,12 @@ unsigned int saveimage (object *arg) {
 #endif
 }
 
+/*
+  loadimage - loads an image of the workspace from the persistent storage selected for the platform.
+*/
 unsigned int loadimage (object *arg) {
 #if defined(sdcardsupport)
-  SD.begin(SDCARD_SS_PIN);
+  SDBegin();
   File file;
   if (stringp(arg)) {
     char buffer[BUFFERSIZE];
@@ -852,9 +809,12 @@ unsigned int loadimage (object *arg) {
 #endif
 }
 
+/*
+  autorunimage - loads and runs an image of the workspace from the persistent storage selected for the platform.
+*/
 void autorunimage () {
 #if defined(sdcardsupport)
-  SD.begin(SDCARD_SS_PIN);
+  SDBegin();
   File file = SD.open("ULISP.IMG");
   if (!file) error2(PSTR("problem autorunning from SD card"));
   object *autorun = (object *)SDReadInt(file);
@@ -1074,7 +1034,7 @@ void checkargs (object *args) {
 /*
   eq - implements Lisp eq
 */
-boolean eq (object *arg1, object *arg2) {
+bool eq (object *arg1, object *arg2) {
   if (arg1 == arg2) return true;  // Same object
   if ((arg1 == nil) || (arg2 == nil)) return false;  // Not both values
   if (arg1->cdr != arg2->cdr) return false;  // Different values
@@ -1357,8 +1317,9 @@ bool stringcompare (object *args, bool lt, bool gt, bool eq) {
   return eq;
 }
 
-// Lookup variable in environment
-
+/*
+  value -  lookup variable in environment
+*/
 object *value (symbol_t n, object *env) {
   while (env != NULL) {
     object *pair = car(env);
@@ -1400,8 +1361,7 @@ object *findvalue (object *var, object *env) {
 object *closure (int tc, symbol_t name, object *function, object *args, object **env) {
   object *state = car(function);
   function = cdr(function);
-  int trace = 0;
-  if (name) trace = tracing(name);
+  int trace = tracing(name);
   if (trace) {
     indent(TraceDepth[trace-1]<<1, ' ', pserial);
     pint(TraceDepth[trace-1]++, pserial);
@@ -1464,7 +1424,7 @@ object *closure (int tc, symbol_t name, object *function, object *args, object *
 object *apply (object *function, object *args, object *env) {
   if (symbolp(function)) {
     builtin_t fname = builtin(function->name);
-    if ((fname < ENDFUNCTIONS) && ((getminmax(fname)>>6) == FUNCTIONS)) {
+    if ((fname < ENDFUNCTIONS) && (fntype(fname) == FUNCTIONS)) {
       Context = fname;
       checkargs(args);
       return ((fn_ptr_type)lookupfn(fname))(args, env);
@@ -1479,7 +1439,7 @@ object *apply (object *function, object *args, object *env) {
     object *result = closure(0, sym(NIL), function, args, &env);
     return eval(result, env);
   }
-  error(PSTR("illegal function"), function);
+  error(illegalfn, function);
   return NULL;
 }
 
@@ -1489,7 +1449,7 @@ object *apply (object *function, object *args, object *env) {
   place - returns a pointer to an object referenced in the second argument of an
   in-place operation such as setf.
 */
-object **place (object *args, object *env, int *bit) {
+object **place (object *args, object *env) {
   if (atom(args)) return &cdr(findvalue(args, env));
   object* function = first(args);
   if (symbolp(function)) {
@@ -1526,9 +1486,7 @@ object **place (object *args, object *env, int *bit) {
   Calls place() to get a pointer to the numeric value.
 */
 object *incfdecf (object *args, int increment, object *env) {
-  int bit;
-  object **loc = place(first(args), env, &bit);
-  if (bit < -1) error2(notanumber);
+  object **loc = place(first(args), env);
   int result = checkinteger(*loc);
   args = cdr(args);
   if (args != NULL) increment = checkinteger(eval(first(args), env)) * increment;
@@ -1574,39 +1532,6 @@ object *cxxxr (object *args, uint8_t pattern) {
   return arg;
 }
 
-// Mapping helper functions
-
-/*
-  mapcl - handles either mapc when mapl=false, or mapl when mapl=true
-*/
-object *mapcl (object *args, object *env, bool mapl) {
-  object *function = first(args);
-  args = cdr(args);
-  object *result = first(args);
-  protect(result);
-  object *params = cons(NULL, NULL);
-  protect(params);
-  // Make parameters
-  while (true) {
-    object *tailp = params;
-    object *lists = args;
-    while (lists != NULL) {
-      object *list = car(lists);
-      if (list == NULL) {
-         unprotect(); unprotect();
-         return result;
-      }
-      if (improperp(list)) error(notproper, list);
-      object *item = mapl ? list : first(list);
-      object *obj = cons(item, NULL);
-      car(lists) = cdr(list);
-      cdr(tailp) = obj; tailp = obj;
-      lists = cdr(lists);
-    }
-    apply(function, cdr(params), env);
-  }
-}
-
 /*
   mapcarfun - function specifying how to combine the results in mapcar
 */
@@ -1630,13 +1555,13 @@ void mapcanfun (object *result, object **tail) {
   mapcarcan - function used by marcar and mapcan when maplist=false, and maplist when maplist=true
   It takes the arguments, the env, a function specifying how the results are combined, and a bool.
 */
-object *mapcarcan (object *args, object *env, mapfun_t fun, bool maplist) {
+object *mapcarcan (object *args, object *env, mapfun_t fun) {
   object *function = first(args);
   args = cdr(args);
   object *params = cons(NULL, NULL);
-  protect(params);
+  push(params,GCStack);
   object *head = cons(NULL, NULL);
-  protect(head);
+  push(head,GCStack);
   object *tail = head;
   // Make parameters
   while (true) {
@@ -1645,12 +1570,11 @@ object *mapcarcan (object *args, object *env, mapfun_t fun, bool maplist) {
     while (lists != NULL) {
       object *list = car(lists);
       if (list == NULL) {
-         unprotect(); unprotect();
+         pop(GCStack); pop(GCStack);
          return cdr(head);
       }
       if (improperp(list)) error(notproper, list);
-      object *item = maplist ? list : first(list);
-      object *obj = cons(item, NULL);
+      object *obj = cons(first(list),NULL);
       car(lists) = cdr(list);
       cdr(tailp) = obj; tailp = obj;
       lists = cdr(lists);
@@ -1676,7 +1600,7 @@ uint8_t const TWI_SDA_PIN = 6;
 uint8_t const TWI_SCL_PIN = 5;
 #endif
 
-#if defined(CPU_ATmega4809) || defined(CPU_AVR128DX48) || defined(CPU_ATtiny3227)
+#if defined(CPU_ATmega4809) || defined(CPU_ATtiny3227) || defined(CPU_AVR64DD28)
 uint32_t const FREQUENCY = 400000L;  // Hardware I2C clock in Hz
 uint32_t const T_RISE = 300L;        // Rise time
 #else
@@ -1691,7 +1615,7 @@ uint8_t const I2C_WRITE = 0;
 #endif
 
 void I2Cinit (bool enablePullup) {
-#if defined(CPU_ATmega4809) || defined(CPU_AVR128DX48) || defined(CPU_ATtiny3227)
+#if defined(CPU_ATmega4809) || defined(CPU_ATtiny3227) || defined(CPU_AVR64DD28)
   #if defined(CPU_ATmega4809)
   if (enablePullup) {
     pinMode(SDA, INPUT_PULLUP);
@@ -1715,7 +1639,7 @@ void I2Cinit (bool enablePullup) {
 }
 
 int I2Cread () {
-#if defined(CPU_ATmega4809) || defined(CPU_AVR128DX48) || defined(CPU_ATtiny3227)
+#if defined(CPU_ATmega4809) || defined(CPU_ATtiny3227) || defined(CPU_AVR64DD28)
   if (I2Ccount != 0) I2Ccount--;
   while (!(TWI0.MSTATUS & TWI_RIF_bm));                           // Wait for read interrupt flag
   uint8_t data = TWI0.MDATA;
@@ -1732,7 +1656,7 @@ int I2Cread () {
 }
 
 bool I2Cwrite (uint8_t data) {
-#if defined(CPU_ATmega4809) || defined(CPU_AVR128DX48) || defined(CPU_ATtiny3227)
+#if defined(CPU_ATmega4809) || defined(CPU_ATtiny3227) || defined(CPU_AVR64DD28)
   TWI0.MCTRLB = TWI_MCMD_RECVTRANS_gc;                            // Prime transaction
   TWI0.MDATA = data;                                              // Send data
   while (!(TWI0.MSTATUS & TWI_WIF_bm));                           // Wait for write to complete
@@ -1748,7 +1672,7 @@ bool I2Cwrite (uint8_t data) {
 }
 
 bool I2Cstart (uint8_t address, uint8_t read) {
-#if defined(CPU_ATmega4809) || defined(CPU_AVR128DX48) || defined(CPU_ATtiny3227)
+#if defined(CPU_ATmega4809) || defined(CPU_ATtiny3227) || defined(CPU_AVR64DD28)
   TWI0.MADDR = address<<1 | read;                                 // Send START condition
   while (!(TWI0.MSTATUS & (TWI_WIF_bm | TWI_RIF_bm)));            // Wait for write or read interrupt flag
   if (TWI0.MSTATUS & TWI_ARBLOST_bm) {                            // Arbitration lost or bus error
@@ -1778,7 +1702,7 @@ bool I2Crestart (uint8_t address, uint8_t read) {
 }
 
 void I2Cstop (uint8_t read) {
-#if defined(CPU_ATmega4809) || defined(CPU_AVR128DX48) || defined(CPU_ATtiny3227)
+#if defined(CPU_ATmega4809) || defined(CPU_ATtiny3227) || defined(CPU_AVR64DD28)
   (void) read;
   TWI0.MCTRLB |= TWI_MCMD_STOP_gc;                                // Send STOP
   while (!((TWI0.MSTATUS & TWI_BUSSTATE_gm) == TWI_BUSSTATE_IDLE_gc)); // Wait for bus to return to idle state
@@ -1792,12 +1716,8 @@ void I2Cstop (uint8_t read) {
 // Streams
 
 inline int spiread () { return SPI.transfer(0); }
-#if defined(CPU_ATmega1284P) || defined(CPU_AVR128DX48) || defined(CPU_AVR64DD28)
+#if defined(CPU_AVR64DD28)
 inline int serial1read () { while (!Serial1.available()) testescape(); return Serial1.read(); }
-#elif defined(CPU_ATmega2560)
-inline int serial1read () { while (!Serial1.available()) testescape(); return Serial1.read(); }
-inline int serial2read () { while (!Serial2.available()) testescape(); return Serial2.read(); }
-inline int serial3read () { while (!Serial3.available()) testescape(); return Serial3.read(); }
 #endif
 #if defined(sdcardsupport)
 File SDpfile, SDgfile;
@@ -1812,29 +1732,12 @@ inline int SDread () {
 #endif
 
 void serialbegin (int address, int baud) {
-  #if defined(CPU_ATmega328P) || defined(CPU_ATmega4809) || defined(CPU_AVR64DD28)
   (void) address; (void) baud;
-  #elif defined(CPU_ATmega1284P) || defined(CPU_AVR128DX48)
-  if (address == 1) Serial1.begin((long)baud*100);
-  else error(PSTR("port not supported"), number(address));
-  #elif defined(CPU_ATmega2560)
-  if (address == 1) Serial1.begin((long)baud*100);
-  else if (address == 2) Serial2.begin((long)baud*100);
-  else if (address == 3) Serial3.begin((long)baud*100);
-  else error(PSTR("port not supported"), number(address));
-  #endif
+  error(PSTR("port not supported"), number(address));
 }
 
 void serialend (int address) {
-  #if defined(CPU_ATmega328P) || defined(CPU_ATmega4809) || defined(CPU_AVR64DD28)
   (void) address;
-  #elif defined(CPU_ATmega1284P) || defined(CPU_AVR128DX48)
-  if (address == 1) {Serial1.flush(); Serial1.end(); }
-  #elif defined(CPU_ATmega2560)
-  if (address == 1) {Serial1.flush(); Serial1.end(); }
-  else if (address == 2) {Serial2.flush(); Serial2.end(); }
-  else if (address == 3) {Serial3.flush(); Serial3.end(); }
-  #endif
 }
 
 gfun_t gstreamfun (object *args) {
@@ -1911,42 +1814,30 @@ pfun_t pstreamfun (object *args) {
 void checkanalogread (int pin) {
 #if defined(ARDUINO_AVR_UNO)
   if (!(pin>=0 && pin<=5)) error(invalidpin, number(pin));
-#elif defined(ARDUINO_AVR_MEGA2560)
-  if (!(pin>=0 && pin<=15)) error(invalidpin, number(pin));
-#elif defined(__AVR_ATmega1284P__)
-  if (!(pin>=0 && pin<=7)) error(invalidpin, number(pin));
 #elif defined(ARDUINO_AVR_NANO_EVERY)
   if (!((pin>=14 && pin<=21))) error(invalidpin, number(pin));
 #elif defined(ARDUINO_AVR_ATmega4809)  /* MegaCoreX core */
   if (!((pin>=22 && pin<=33) || (pin>=36 && pin<=39))) error(invalidpin, number(pin));
 #elif defined(ARDUINO_AVR_ATtiny3227)
   if (!((pin>=0 && pin<=3) || (pin>=6 && pin<=7) || (pin>=10 && pin<=11) || pin==18)) error(invalidpin, number(pin));
-#elif defined(__AVR_AVR128DA48__)
-  if (!(pin>=22 && pin<=39)) error(invalidpin, number(pin));
 #endif
 }
 
 void checkanalogwrite (int pin) {
 #if defined(ARDUINO_AVR_UNO)
   if (!(pin==3 || pin==5 || pin==6 || (pin>=9 && pin<=11))) error(invalidpin, number(pin));
-#elif defined(ARDUINO_AVR_MEGA2560)
-  if (!((pin>=2 && pin<=13) || (pin>=44 && pin<=46))) error(invalidpin, number(pin));
-#elif defined(__AVR_ATmega1284P__)
-  if (!(pin==3 || pin==4 || pin==6 || pin==7 || (pin>=12 && pin<=15))) error(invalidpin, number(pin));
 #elif defined(ARDUINO_AVR_NANO_EVERY)
   if (!(pin==3 || pin==5 || pin==6 || pin==9 || pin==10)) error(invalidpin, number(pin));
 #elif defined(ARDUINO_AVR_ATmega4809)  /* MegaCoreX core */
   if (!((pin>=16 && pin<=19) || (pin>=38 && pin<=39))) error(invalidpin, number(pin));
 #elif defined(ARDUINO_AVR_ATtiny3227)
   if (!((pin>=0 && pin<=1) || (pin>=9 && pin<=11) || pin==20)) error(invalidpin, number(pin));
-#elif defined(__AVR_AVR128DA48__)
-  if (!((pin>=4 && pin<=5) || (pin>=8 && pin<=19) || (pin>=38 && pin<=39))) error(invalidpin, number(pin));
 #endif
 }
 
 // Note
 
-#if defined(CPU_ATmega4809) || defined(CPU_AVR128DX48) || defined(CPU_ATtiny3227)
+#if defined(CPU_ATtiny3227) || defined(CPU_AVR64DD28)
 const int scale[] PROGMEM = {4186,4435,4699,4978,5274,5588,5920,6272,6645,7040,7459,7902};
 #else
 const uint8_t scale[] PROGMEM = {239,226,213,201,190,179,169,160,151,142,134,127};
@@ -1967,41 +1858,13 @@ void playnote (int pin, int note, int octave) {
   OCR2A = pgm_read_byte(&scale[note%12]) - 1;
   TCCR2B = 0<<WGM22 | prescaler<<CS20;
 
-#elif defined(CPU_ATmega2560)
-  if (pin == 9) {
-    DDRH = DDRH | 1<<DDH6; // PH6 (Arduino D9) as output
-    TCCR2A = 0<<COM2A0 | 1<<COM2B0 | 2<<WGM20; // Toggle OC2B on match
-  } else if (pin == 10) {
-    DDRB = DDRB | 1<<DDB4; // PB4 (Arduino D10) as output
-    TCCR2A = 1<<COM2A0 | 0<<COM2B0 | 2<<WGM20; // Toggle OC2A on match
-  } else error(PSTR("only pins 9 and 10 supported"), number(pin));
-  int oct = octave + note/12;
-  int prescaler = 9 - oct;
-  if (prescaler<3 || prescaler>6) error(PSTR("octave out of range"), number(oct));
-  OCR2A = pgm_read_byte(&scale[note%12]) - 1;
-  TCCR2B = 0<<WGM22 | prescaler<<CS20;
-
-#elif defined(CPU_ATmega1284P)
-  if (pin == 14) {
-    DDRD = DDRD | 1<<DDD6; // PD6 (Arduino D14) as output
-    TCCR2A = 0<<COM2A0 | 1<<COM2B0 | 2<<WGM20; // Toggle OC2B on match
-  } else if (pin == 15) {
-    DDRD = DDRD | 1<<DDD7; // PD7 (Arduino D15) as output
-    TCCR2A = 1<<COM2A0 | 0<<COM2B0 | 2<<WGM20; // Toggle OC2A on match
-  } else error(PSTR("only pins 14 and 15 supported"), number(pin));
-  int oct = octave + note/12;
-  int prescaler = 9 - oct;
-  if (prescaler<3 || prescaler>6) error(PSTR("octave out of range"), number(oct));
-  OCR2A = pgm_read_byte(&scale[note%12]) - 1;
-  TCCR2B = 0<<WGM22 | prescaler<<CS20;
-
 #elif defined(CPU_ATmega4809) || defined(CPU_ATtiny3227)
   int oct = octave + note/12;
   int prescaler = 8 - oct;
   if (prescaler<0 || prescaler>8) error(PSTR("octave out of range"), number(oct));
   tone(pin, scale[note%12]>>prescaler);
 
-#elif defined(CPU_AVR128DX48)
+#elif defined(CPU_AVR64DD28)
   int oct = octave + note/12;
   int prescaler = 8 - oct;
   if (prescaler<0 || prescaler>8) error(PSTR("octave out of range"), number(oct));
@@ -2010,7 +1873,7 @@ void playnote (int pin, int note, int octave) {
 }
 
 void nonote (int pin) {
-#if defined(CPU_ATmega4809) || defined(CPU_AVR128DX48) || defined(CPU_ATtiny3227)
+#if defined(CPU_ATmega4809) || defined(CPU_ATtiny3227) || defined(CPU_AVR64DD28)
   noTone(pin);
 #else
   (void) pin;
@@ -2020,7 +1883,7 @@ void nonote (int pin) {
 
 // Sleep
 
-#if defined(CPU_ATmega328P) || defined(CPU_ATmega2560) || defined(CPU_ATmega1284P)
+#if defined(CPU_ATmega328P)
   // Interrupt vector for sleep watchdog
   ISR(WDT_vect) {
   WDTCSR |= 1<<WDIE;
@@ -2032,13 +1895,13 @@ void initsleep () {
 }
 
 void sleep () {
-#if defined(CPU_ATtiny3227)
+#if defined(CPU_ATtiny3227) || defined(CPU_AVR64DD28)
   ADC0.CTRLA = ADC0.CTRLA & ~1; // Turn off ADC
   delay(100);  // Give serial time to settle
   sleep_enable();
   sleep_cpu();
   ADC0.CTRLA = ADC0.CTRLA | 1; // Turn on ADC
-#elif defined(CPU_ATmega328P) || defined(CPU_ATmega2560) || defined(CPU_ATmega1284P)
+#elif defined(CPU_ATmega328P)
   ADCSRA = ADCSRA & ~(1<<ADEN); // Turn off ADC
   delay(100);  // Give serial time to settle
   sleep_enable();
@@ -2048,19 +1911,13 @@ void sleep () {
 }
 
 void doze (int secs) {
-#if defined(CPU_ATmega328P) || defined(CPU_ATmega2560) || defined(CPU_ATmega1284P)
+#if defined(CPU_ATmega328P)
   // Set up Watchdog timer for 1 Hz interrupt
   WDTCSR = 1<<WDCE | 1<<WDE;
   WDTCSR = 1<<WDIE | 6<<WDP0;     // 1 sec interrupt
-#if defined(CPU_ATmega2560) || defined(CPU_ATmega1284P)
-  PRR0 = PRR0 | 1<<PRTIM0;
-#endif
   while (secs > 0) { sleep(); secs--; }
   WDTCSR = 1<<WDCE | 1<<WDE;     // Disable watchdog
   WDTCSR = 0;
-#if defined(CPU_ATmega2560) || defined(CPU_ATmega1284P)
-  PRR0 = PRR0 & ~(1<<PRTIM0);
-#endif
 #else
   delay(1000*secs);
 #endif
@@ -2127,7 +1984,7 @@ int subwidthlist (object *form, int w) {
 */
 void superprint (object *form, int lm, pfun_t pfun) {
   if (atom(form)) {
-    if (symbolp(form) && form->name == sym(NOTHING)) printsymbol(form, pfun);
+    if (isbuiltin(form, NOTHING)) printsymbol(form, pfun);
     else printobject(form, pfun);
   } else if (quoted(form)) {
     pfun('\'');
@@ -2238,9 +2095,9 @@ object *sp_defvar (object *args, object *env) {
   to the variable specified in the first argument.
 */
 object *sp_setq (object *args, object *env) {
-  object *arg = nil;
+  object *arg = nil; builtin_t setq = Context;
   while (args != NULL) {
-    if (cdr(args) == NULL) error2(oddargs);
+    if (cdr(args) == NULL) { Context = setq; error2(oddargs); }
     object *pair = findvalue(first(args), env);
     arg = eval(second(args), env);
     cdr(pair) = arg;
@@ -2276,10 +2133,8 @@ object *sp_loop (object *args, object *env) {
   and returns the new list.
 */
 object *sp_push (object *args, object *env) {
-  int bit;
   object *item = eval(first(args), env);
-  object **loc = place(second(args), env, &bit);
-  if (bit != -1) error2(invalidarg);
+  object **loc = place(second(args), env);
   push(item, *loc);
   return *loc;
 }
@@ -2290,11 +2145,9 @@ object *sp_push (object *args, object *env) {
   and returns that item.
 */
 object *sp_pop (object *args, object *env) {
-  int bit;
   object *arg = first(args);
   if (arg == NULL) error2(invalidarg);
-  object **loc = place(arg, env, &bit);
-  if (bit < -1) error(invalidarg, arg);
+  object **loc = place(arg, env);
   if (!consp(*loc)) error(notalist, *loc);
   object *result = car(*loc);
   pop(*loc);
@@ -2326,11 +2179,11 @@ object *sp_decf (object *args, object *env) {
   For each pair of arguments modifies a place to the result of evaluating value.
 */
 object *sp_setf (object *args, object *env) {
-  int bit;
+  builtin_t setf = Context;
   object *arg = nil;
   while (args != NULL) {
-    if (cdr(args) == NULL) error2(oddargs);
-    object **loc = place(first(args), env, &bit);
+    if (cdr(args) == NULL) { Context = setf; error2(oddargs); }
+    object **loc = place(first(args), env);
     arg = eval(second(args), env);
     *loc = arg;
     args = cddr(args);
@@ -3131,7 +2984,30 @@ object *fn_append (object *args, object *env) {
   It returns the first list argument.
 */
 object *fn_mapc (object *args, object *env) {
-  return mapcl(args, env, false);
+  object *function = first(args);
+  args = cdr(args);
+  object *result = first(args);
+  push(result,GCStack);
+  object *params = cons(NULL, NULL);
+  push(params,GCStack);
+  // Make parameters
+  while (true) {
+    object *tailp = params;
+    object *lists = args;
+    while (lists != NULL) {
+      object *list = car(lists);
+      if (list == NULL) {
+         pop(GCStack); pop(GCStack);
+         return result;
+      }
+      if (improperp(list)) error(notproper, list);
+      object *obj = cons(first(list),NULL);
+      car(lists) = cdr(list);
+      cdr(tailp) = obj; tailp = obj;
+      lists = cdr(lists);
+    }
+    apply(function, cdr(params), env);
+  }
 }
 
 /*
@@ -3139,7 +3015,7 @@ object *fn_mapc (object *args, object *env) {
   Applies the function to each element in one or more lists, and returns the resulting list.
 */
 object *fn_mapcar (object *args, object *env) {
-  return mapcarcan(args, env, mapcarfun, false);
+  return mapcarcan(args, env, mapcarfun);
 }
 
 /*
@@ -3148,7 +3024,7 @@ object *fn_mapcar (object *args, object *env) {
   and these are destructively concatenated together to give the value returned.
 */
 object *fn_mapcan (object *args, object *env) {
-  return mapcarcan(args, env, mapcanfun, false);
+  return mapcarcan(args, env, mapcanfun);
 }
 
 // Arithmetic functions
@@ -3242,6 +3118,7 @@ object *fn_divide (object *args, object *env) {
 /*
   (mod number number)
   Returns its first argument modulo the second argument.
+  If both arguments are integers the result is an integer; otherwise it's a floating-point number.
 */
 object *fn_mod (object *args, object *env) {
   (void) env;
@@ -3937,7 +3814,7 @@ object *fn_writestring (object *args, object *env) {
   (void) env;
   object *obj = first(args);
   pfun_t pfun = pstreamfun(cdr(args));
-  char temp = Flags;
+  flags_t temp = Flags;
   clrflag(PRINTREADABLY);
   printstring(obj, pfun);
   Flags = temp;
@@ -3952,7 +3829,7 @@ object *fn_writeline (object *args, object *env) {
   (void) env;
   object *obj = first(args);
   pfun_t pfun = pstreamfun(cdr(args));
-  char temp = Flags;
+  flags_t temp = Flags;
   clrflag(PRINTREADABLY);
   printstring(obj, pfun);
   pln(pfun);
@@ -3983,19 +3860,21 @@ object *fn_restarti2c (object *args, object *env) {
 }
 
 /*
-  (gc)
+  (gc [print time])
   Forces a garbage collection and prints the number of objects collected, and the time taken.
 */
-object *fn_gc (object *obj, object *env) {
-  int initial = Freespace;
-  unsigned long start = micros();
-  gc(obj, env);
-  unsigned long elapsed = micros() - start;
-  pfstring(PSTR("Space: "), pserial);
-  pint(Freespace - initial, pserial);
-  pfstring(PSTR(" bytes, Time: "), pserial);
-  pint(elapsed, pserial);
-  pfstring(PSTR(" us\n"), pserial);
+object *fn_gc (object *args, object *env) {
+  if (args == NULL || first(args) != NULL) {
+    int initial = Freespace;
+    unsigned long start = micros();
+    gc(args, env);
+    unsigned long elapsed = micros() - start;
+    pfstring(PSTR("Space: "), pserial);
+    pint(Freespace - initial, pserial);
+    pfstring(PSTR(" bytes, Time: "), pserial);
+    pint(elapsed, pserial);
+    pfstring(PSTR(" us\n"), pserial);
+  } else gc(args, env);
   return nil;
 }
 
@@ -4318,7 +4197,7 @@ object *fn_format (object *args, object *env) {
   object *output = first(args);
   object *obj;
   if (output == nil) { obj = startstring(); pfun = pstr; }
-  else if (output != tee) pfun = pstreamfun(args);
+  else if (!eq(output, tee)) pfun = pstreamfun(args);
   object *formatstr = checkstring(second(args));
   object *save = NULL;
   args = cddr(args);
@@ -4624,52 +4503,6 @@ const char string181[] PROGMEM = ":pinc";
 const char string182[] PROGMEM = ":portd";
 const char string183[] PROGMEM = ":ddrd";
 const char string184[] PROGMEM = ":pind";
-#elif defined(CPU_ATmega1284P)
-const char string173[] PROGMEM = ":default";
-const char string174[] PROGMEM = ":internal1v1";
-const char string175[] PROGMEM = ":internal2v56";
-const char string176[] PROGMEM = ":external";
-const char string177[] PROGMEM = ":porta";
-const char string178[] PROGMEM = ":ddra";
-const char string179[] PROGMEM = ":pina";
-const char string180[] PROGMEM = ":portb";
-const char string181[] PROGMEM = ":ddrb";
-const char string182[] PROGMEM = ":pinb";
-const char string183[] PROGMEM = ":portc";
-const char string184[] PROGMEM = ":ddrc";
-const char string185[] PROGMEM = ":pinc";
-const char string186[] PROGMEM = ":portd";
-const char string187[] PROGMEM = ":ddrd";
-const char string188[] PROGMEM = ":pind";
-#elif defined(CPU_ATmega2560)
-const char string173[] PROGMEM = ":default";
-const char string174[] PROGMEM = ":internal1v1";
-const char string175[] PROGMEM = ":internal2v56";
-const char string176[] PROGMEM = ":external";
-const char string177[] PROGMEM = ":porta";
-const char string178[] PROGMEM = ":ddra";
-const char string179[] PROGMEM = ":pina";
-const char string180[] PROGMEM = ":portb";
-const char string181[] PROGMEM = ":ddrb";
-const char string182[] PROGMEM = ":pinb";
-const char string183[] PROGMEM = ":portc";
-const char string184[] PROGMEM = ":ddrc";
-const char string185[] PROGMEM = ":pinc";
-const char string186[] PROGMEM = ":portd";
-const char string187[] PROGMEM = ":ddrd";
-const char string188[] PROGMEM = ":pind";
-const char string189[] PROGMEM = ":porte";
-const char string190[] PROGMEM = ":ddre";
-const char string191[] PROGMEM = ":pine";
-const char string192[] PROGMEM = ":portf";
-const char string193[] PROGMEM = ":ddrf";
-const char string194[] PROGMEM = ":pinf";
-const char string195[] PROGMEM = ":portg";
-const char string196[] PROGMEM = ":ddrg";
-const char string197[] PROGMEM = ":ping";
-const char string198[] PROGMEM = ":portj";
-const char string199[] PROGMEM = ":ddrj";
-const char string200[] PROGMEM = ":pinj";
 #elif defined(CPU_ATmega4809)
 const char string173[] PROGMEM = ":default";
 const char string174[] PROGMEM = ":internal";
@@ -4698,35 +4531,9 @@ const char string196[] PROGMEM = ":porte-in";
 const char string197[] PROGMEM = ":portf-dir";
 const char string198[] PROGMEM = ":portf-out";
 const char string199[] PROGMEM = ":portf-in";
-#elif defined(CPU_AVR128DX48)
-const char string173[] PROGMEM = ":default";
-const char string174[] PROGMEM = ":vdd";
-const char string175[] PROGMEM = ":internal1v024";
-const char string176[] PROGMEM = ":internal2v048";
-const char string177[] PROGMEM = ":internal4v096";
-const char string178[] PROGMEM = ":internal2v5";
-const char string179[] PROGMEM = ":external";
-const char string180[] PROGMEM = ":adc-dac0";
-const char string181[] PROGMEM = ":adc-temperature";
-const char string182[] PROGMEM = ":porta-dir";
-const char string183[] PROGMEM = ":porta-out";
-const char string184[] PROGMEM = ":porta-in";
-const char string185[] PROGMEM = ":portb-dir";
-const char string186[] PROGMEM = ":portb-out";
-const char string187[] PROGMEM = ":portb-in";
-const char string188[] PROGMEM = ":portc-dir";
-const char string189[] PROGMEM = ":portc-out";
-const char string190[] PROGMEM = ":portc-in";
-const char string191[] PROGMEM = ":portd-dir";
-const char string192[] PROGMEM = ":portd-out";
-const char string193[] PROGMEM = ":portd-in";
-const char string194[] PROGMEM = ":porte-dir";
-const char string195[] PROGMEM = ":porte-out";
-const char string196[] PROGMEM = ":porte-in";
-const char string197[] PROGMEM = ":portf-dir";
-const char string198[] PROGMEM = ":portf-out";
-const char string199[] PROGMEM = ":portf-in";
 #elif defined(CPU_ATtiny3227)
+const char string173[] PROGMEM = ":flag";
+#elif defined(CPU_AVR64DD28)
 const char string173[] PROGMEM = ":flag";
 #endif
 
@@ -4881,7 +4688,7 @@ const tbl_entry_t lookup_table[] PROGMEM = {
   { string146, fn_writestring, 0212 },
   { string147, fn_writeline, 0212 },
   { string148, fn_restarti2c, 0212 },
-  { string149, fn_gc, 0200 },
+  { string149, fn_gc, 0201 },
   { string150, fn_room, 0200 },
   { string151, fn_saveimage, 0201 },
   { string152, fn_loadimage, 0201 },
@@ -4918,52 +4725,6 @@ const tbl_entry_t lookup_table[] PROGMEM = {
   { string182, (fn_ptr_type)&PORTD, REGISTER },
   { string183, (fn_ptr_type)&DDRD, REGISTER },
   { string184, (fn_ptr_type)&PIND, REGISTER },
-#elif defined(CPU_ATmega1284P)
-  { string173, (fn_ptr_type)DEFAULT, ANALOGREFERENCE },
-  { string174, (fn_ptr_type)INTERNAL1V1, ANALOGREFERENCE },
-  { string175, (fn_ptr_type)INTERNAL2V56, ANALOGREFERENCE },
-  { string176, (fn_ptr_type)EXTERNAL, ANALOGREFERENCE },
-  { string177, (fn_ptr_type)&PORTA, REGISTER },
-  { string178, (fn_ptr_type)&DDRA, REGISTER },
-  { string179, (fn_ptr_type)&PINA, REGISTER },
-  { string180, (fn_ptr_type)&PORTB, REGISTER },
-  { string181, (fn_ptr_type)&DDRB, REGISTER },
-  { string182, (fn_ptr_type)&PINB, REGISTER },
-  { string183, (fn_ptr_type)&PORTC, REGISTER },
-  { string184, (fn_ptr_type)&DDRC, REGISTER },
-  { string185, (fn_ptr_type)&PINC, REGISTER },
-  { string186, (fn_ptr_type)&PORTD, REGISTER },
-  { string187, (fn_ptr_type)&DDRD, REGISTER },
-  { string188, (fn_ptr_type)&PIND, REGISTER },
-#elif defined(CPU_ATmega2560)
-  { string173, (fn_ptr_type)DEFAULT, ANALOGREFERENCE },
-  { string174, (fn_ptr_type)INTERNAL1V1, ANALOGREFERENCE },
-  { string175, (fn_ptr_type)INTERNAL2V56, ANALOGREFERENCE },
-  { string176, (fn_ptr_type)EXTERNAL, ANALOGREFERENCE },
-  { string177, (fn_ptr_type)&PORTA, REGISTER },
-  { string178, (fn_ptr_type)&DDRA, REGISTER },
-  { string179, (fn_ptr_type)&PINA, REGISTER },
-  { string180, (fn_ptr_type)&PORTB, REGISTER },
-  { string181, (fn_ptr_type)&DDRB, REGISTER },
-  { string182, (fn_ptr_type)&PINB, REGISTER },
-  { string183, (fn_ptr_type)&PORTC, REGISTER },
-  { string184, (fn_ptr_type)&DDRC, REGISTER },
-  { string185, (fn_ptr_type)&PINC, REGISTER },
-  { string186, (fn_ptr_type)&PORTD, REGISTER },
-  { string187, (fn_ptr_type)&DDRD, REGISTER },
-  { string188, (fn_ptr_type)&PIND, REGISTER },
-  { string189, (fn_ptr_type)&PORTE, REGISTER },
-  { string190, (fn_ptr_type)&DDRE, REGISTER },
-  { string191, (fn_ptr_type)&PINE, REGISTER },
-  { string192, (fn_ptr_type)&PORTF, REGISTER },
-  { string193, (fn_ptr_type)&DDRF, REGISTER },
-  { string194, (fn_ptr_type)&PINF, REGISTER },
-  { string195, (fn_ptr_type)&PORTG, REGISTER },
-  { string196, (fn_ptr_type)&DDRG, REGISTER },
-  { string197, (fn_ptr_type)&PING, REGISTER },
-  { string198, (fn_ptr_type)&PORTJ, REGISTER },
-  { string199, (fn_ptr_type)&DDRJ, REGISTER },
-  { string200, (fn_ptr_type)&PINJ, REGISTER },
 #elif defined(CPU_ATmega4809)
   { string173, (fn_ptr_type)DEFAULT, ANALOGREFERENCE },
   { string174, (fn_ptr_type)INTERNAL, ANALOGREFERENCE },
@@ -4992,35 +4753,9 @@ const tbl_entry_t lookup_table[] PROGMEM = {
   { string197, (fn_ptr_type)&PORTF_DIR, REGISTER },
   { string198, (fn_ptr_type)&PORTF_OUT, REGISTER },
   { string199, (fn_ptr_type)&PORTF_IN, REGISTER },
-#elif defined(CPU_AVR128DX48)
-  { string173, (fn_ptr_type)DEFAULT, ANALOGREFERENCE },
-  { string174, (fn_ptr_type)VDD, ANALOGREFERENCE },
-  { string175, (fn_ptr_type)INTERNAL1V024, ANALOGREFERENCE },
-  { string176, (fn_ptr_type)INTERNAL2V048, ANALOGREFERENCE },
-  { string177, (fn_ptr_type)INTERNAL4V096, ANALOGREFERENCE },
-  { string178, (fn_ptr_type)INTERNAL2V5, ANALOGREFERENCE },
-  { string179, (fn_ptr_type)EXTERNAL, ANALOGREFERENCE },
-  { string180, (fn_ptr_type)ADC_DAC0, ANALOGREAD },
-  { string181, (fn_ptr_type)ADC_TEMPERATURE, ANALOGREAD },
-  { string182, (fn_ptr_type)&PORTA_DIR, REGISTER },
-  { string183, (fn_ptr_type)&PORTA_OUT, REGISTER },
-  { string184, (fn_ptr_type)&PORTA_IN, REGISTER },
-  { string185, (fn_ptr_type)&PORTB_DIR, REGISTER },
-  { string186, (fn_ptr_type)&PORTB_OUT, REGISTER },
-  { string187, (fn_ptr_type)&PORTB_IN, REGISTER },
-  { string188, (fn_ptr_type)&PORTC_DIR, REGISTER },
-  { string189, (fn_ptr_type)&PORTC_OUT, REGISTER },
-  { string190, (fn_ptr_type)&PORTC_IN, REGISTER },
-  { string191, (fn_ptr_type)&PORTD_DIR, REGISTER },
-  { string192, (fn_ptr_type)&PORTD_OUT, REGISTER },
-  { string193, (fn_ptr_type)&PORTD_IN, REGISTER },
-  { string194, (fn_ptr_type)&PORTE_DIR, REGISTER },
-  { string195, (fn_ptr_type)&PORTE_OUT, REGISTER },
-  { string196, (fn_ptr_type)&PORTE_IN, REGISTER },
-  { string197, (fn_ptr_type)&PORTF_DIR, REGISTER },
-  { string198, (fn_ptr_type)&PORTF_OUT, REGISTER },
-  { string199, (fn_ptr_type)&PORTF_IN, REGISTER },
 #elif defined(CPU_ATtiny3227)
+  { string173, (fn_ptr_type)&FLAG, REGISTER },
+#elif defined(CPU_AVR64DD28)
   { string173, (fn_ptr_type)&FLAG, REGISTER },
 #endif
 };
@@ -5028,8 +4763,8 @@ const tbl_entry_t lookup_table[] PROGMEM = {
 // Table lookup functions
 
 /*
-  lookupbuiltin - looks up a string in lookup_table[], and returns the index of its entry,
-  or ENDFUNCTIONS if no match is found
+  lookupbuiltin - looks up a string in lookup_table[], and returns the index of its entry, or ENDFUNCTIONS 
+  if no match is found. Doesn't support an extensions file.
 */
 builtin_t lookupbuiltin (char* n) {
   int entries = arraysize(lookup_table);
@@ -5109,7 +4844,7 @@ object *eval (object *form, object *env) {
   int TC=0;
   EVAL:
   // Enough space?
-  //Serial.println((uint16_t)sp - (uint16_t)__bss_end); // Find best STACKDIFF value
+  // Serial.println((uint16_t)sp - (uint16_t)__bss_end); // Find best STACKDIFF value
   if ((uint16_t)sp - (uint16_t)__bss_end < STACKDIFF) { Context = NIL; error2(PSTR("stack overflow")); }
   if (Freespace <= WORKSPACESIZE>>4) gc(form, env);      // GC when 1/16 of workspace left
   // Escape
@@ -5139,7 +4874,7 @@ object *eval (object *form, object *env) {
   object *function = car(form);
   object *args = cdr(form);
 
-  if (function == NULL) error(PSTR("illegal function"), nil);
+  if (function == NULL) error(illegalfn, function);
   if (!listp(args)) error(PSTR("can't evaluate a dotted pair"), args);
 
   // List starts with a builtin symbol?
@@ -5147,7 +4882,6 @@ object *eval (object *form, object *env) {
     builtin_t name = builtin(function->name);
 
     if ((name == LET) || (name == LETSTAR)) {
-      int TCstart = TC;
       if (args == NULL) error2(noargument);
       object *assigns = first(args);
       if (!listp(assigns)) error(notalist, assigns);
@@ -5158,7 +4892,7 @@ object *eval (object *form, object *env) {
         object *assign = car(assigns);
         if (!consp(assign)) push(cons(assign,nil), newenv);
         else if (cdr(assign) == NULL) push(cons(first(assign),nil), newenv);
-        else push(cons(first(assign),eval(second(assign),env)), newenv);
+        else push(cons(first(assign), eval(second(assign),env)), newenv);
         car(GCStack) = newenv;
         if (name == LETSTAR) env = newenv;
         assigns = cdr(assigns);
@@ -5166,7 +4900,6 @@ object *eval (object *form, object *env) {
       env = newenv;
       unprotect();
       form = tf_progn(forms,env);
-      TC = TCstart;
       goto EVAL;
     }
 
@@ -5180,34 +4913,33 @@ object *eval (object *form, object *env) {
       }
       return cons(bsymbol(CLOSURE), cons(envcopy,args));
     }
-    uint8_t fntype = getminmax(name)>>6;
 
-    if (fntype == SPECIAL_FORMS) {
-      Context = name;
-      checkargs(args);
-      return ((fn_ptr_type)lookupfn(name))(args, env);
+    switch(fntype(name)) {    
+      case SPECIAL_FORMS:
+        Context = name;
+        checkargs(args);
+        return ((fn_ptr_type)lookupfn(name))(args, env);
+  
+      case TAIL_FORMS:
+        Context = name;
+        checkargs(args);
+        form = ((fn_ptr_type)lookupfn(name))(args, env);
+        TC = 1;
+        goto EVAL;
+     
+      case OTHER_FORMS: error(illegalfn, function);
     }
-
-    if (fntype == TAIL_FORMS) {
-      Context = name;
-      checkargs(args);
-      form = ((fn_ptr_type)lookupfn(name))(args, env);
-      TC = 1;
-      goto EVAL;
-    }
-    if (fntype == OTHER_FORMS) error(PSTR("can't be used as a function"), function);
   }
 
   // Evaluate the parameters - result in head
-  object *fname = car(form);
   int TCstart = TC;
-  object *head = cons(eval(fname, env), NULL);
+  object *head = cons(eval(function, env), NULL);
   protect(head); // Don't GC the result list
   object *tail = head;
   form = cdr(form);
   int nargs = 0;
 
-  while (form != NULL){
+  while (form != NULL) {
     object *obj = cons(eval(car(form),env),NULL);
     cdr(tail) = obj;
     tail = obj;
@@ -5215,12 +4947,13 @@ object *eval (object *form, object *env) {
     nargs++;
   }
 
+  object *fname = function;
   function = car(head);
   args = cdr(head);
 
   if (symbolp(function)) {
+    if (!builtinp(function->name)) { Context = NIL; error(illegalfn, function); }
     builtin_t bname = builtin(function->name);
-    if (!builtinp(function->name)) error(PSTR("not valid here"), fname);
     Context = bname;
     checkminmax(bname, nargs);
     object *result = ((fn_ptr_type)lookupfn(bname))(args, env);
@@ -5232,16 +4965,16 @@ object *eval (object *form, object *env) {
     symbol_t name = sym(NIL);
     if (!listp(fname)) name = fname->name;
 
-    if (isbuiltin(car(function), LAMBDA)) {
+    if (isbuiltin(car(function), LAMBDA)) { 
       form = closure(TCstart, name, function, args, &env);
       unprotect();
-      int trace = tracing(fname->name);
+      int trace = tracing(name);
       if (trace) {
         object *result = eval(form, env);
         indent((--(TraceDepth[trace-1]))<<1, ' ', pserial);
         pint(TraceDepth[trace-1], pserial);
         pserial(':'); pserial(' ');
-        printobject(fname, pserial); pfstring(PSTR(" returned "), pserial);
+        printobject(fname, pserial); pfstring(" returned ", pserial);
         printobject(result, pserial); pln(pserial);
         return result;
       } else {
@@ -5259,7 +4992,7 @@ object *eval (object *form, object *env) {
     }
 
   }
-  error(PSTR("illegal function"), fname); return nil;
+  error(illegalfn, fname); return nil;
 }
 
 // Print functions
@@ -5350,7 +5083,7 @@ void pbuiltin (builtin_t name, pfun_t pfun) {
   #endif
   while (1) {
     #if defined(CPU_ATmega4809) || defined(CPU_ATtiny3227)
-    char c = *s++;
+    char c = @s++;
     #else
     char c = pgm_read_byte(s++);
     #endif
@@ -5430,17 +5163,6 @@ void pintbase (uint16_t i, uint8_t base, pfun_t pfun) {
 }
 
 /*
-  pinthex2 - prints a two-digit hexadecimal number with leading zeros to the specified stream
-*/
-void printhex2 (int i, pfun_t pfun) {
-  for (unsigned int d=0x10; d>0; d=d>>4) {
-    unsigned int j = i/d;
-    pfun((j<10) ? j+'0' : j+'W'); 
-    i = i - j*d;
-  }
-}
-
-/*
   pln - prints a newline to the specified stream
 */
 inline void pln (pfun_t pfun) {
@@ -5511,7 +5233,7 @@ void printobject (object *form, pfun_t pfun) {
   prin1object - prints any Lisp object to the specified stream escaping special characters
 */
 void prin1object (object *form, pfun_t pfun) {
-  char temp = Flags;
+  flags_t temp = Flags;
   clrflag(PRINTREADABLY);
   printobject(form, pfun);
   Flags = temp;
@@ -5842,7 +5564,7 @@ void setup () {
   initworkspace();
   initenv();
   initsleep();
-  pfstring(PSTR("uLisp 4.6 "), pserial); pln(pserial);
+  pfstring(PSTR("uLisp 4.7 "), pserial); pln(pserial);
 }
 
 // Read/Evaluate/Print loop
@@ -5853,9 +5575,9 @@ void setup () {
 void repl (object *env) {
   for (;;) {
     RandomSeed = micros();
-    gc(NULL, env);
     #if defined(printfreespace)
-    pint(Freespace, pserial);
+    if (!tstflag(NOECHO)) gc(NULL, env);
+    pint(Freespace+1, pserial);
     #endif
     if (BreakLevel) {
       pfstring(PSTR(" : "), pserial);
