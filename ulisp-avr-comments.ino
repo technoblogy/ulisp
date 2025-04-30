@@ -1,5 +1,5 @@
-/* uLisp AVR Release 4.7 - www.ulisp.com
-   David Johnson-Davies - www.technoblogy.com - 3rd November 2024
+/* uLisp AVR Release 4.7d - www.ulisp.com
+   David Johnson-Davies - www.technoblogy.com - 30th April 2025
    
    Licensed under the MIT license: https://opensource.org/licenses/MIT
 */
@@ -43,7 +43,7 @@ const char LispLibrary[] PROGMEM = "";
 
 #if defined(ARDUINO_AVR_MEGA2560)
   #include <EEPROM.h>
-  #define WORKSPACESIZE (1344-SDSIZE)     /* Objects (4*bytes) */
+  #define WORKSPACESIZE (1336-SDSIZE)     /* Objects (4*bytes) */
   #define EEPROMSIZE 4096                 /* Bytes */
   #define STACKDIFF 320
   #define CPU_ATmega2560
@@ -70,7 +70,7 @@ const char LispLibrary[] PROGMEM = "";
 #elif defined(__AVR_AVR128DB48__)
   #include <Flash.h>
   #define Serial Serial3
-  #define WORKSPACESIZE (2920-SDSIZE)     /* Objects (4*bytes) */
+  #define WORKSPACESIZE (2872-SDSIZE)     /* Objects (4*bytes) */
   #define FLASHWRITESIZE 15872            /* Bytes */
   #define CODESIZE 96                     /* Bytes <= 512 */
   #define STACKDIFF 320
@@ -1495,6 +1495,7 @@ void pslice (object *array, int size, int slice, object *dims, pfun_t pfun, bool
         (index & (sizeof(int)==4 ? 0x1F : 0x0F)) & 1, pfun);
       else printobject(*arrayref(array, index, size), pfun);
     } else { pfun('('); pslice(array, size, index, cdr(dims), pfun, bitp); pfun(')'); }
+    testescape();
   }
 }
 
@@ -2131,6 +2132,7 @@ object *dobody (object *args, object *env, bool star) {
   protect(head);
   object *ptr = head;
   object *newenv = env;
+  protect(newenv);
   while (varlist != NULL) {
     object *varform = first(varlist);
     object *var, *init = NULL, *step = NULL;
@@ -2145,7 +2147,9 @@ object *dobody (object *args, object *env, bool star) {
       }
     }  
     object *pair = cons(var, init);
+    unprotect(); // newenv
     push(pair, newenv);
+    protect(newenv);
     if (star) env = newenv;
     object *cell = cons(cons(step, pair), NULL);
     cdr(ptr) = cell; ptr = cdr(ptr);
@@ -2157,9 +2161,11 @@ object *dobody (object *args, object *env, bool star) {
   while (eval(endtest, env) == NULL) {
     object *forms = cddr(args);
     while (forms != NULL) {
-    object *result = eval(car(forms), env);
+      object *result = eval(car(forms), env);
       if (tstflag(RETURNFLAG)) {
         clrflag(RETURNFLAG);
+        unprotect(); // newenv
+        unprotect(); // head
         return result;
       }
       forms = cdr(forms);
@@ -2187,7 +2193,8 @@ object *dobody (object *args, object *env, bool star) {
       count--;
     }
   }
-  unprotect();
+  unprotect(); // newenv
+  unprotect(); // head
   return eval(tf_progn(results, env), env);
 }
 
@@ -2624,6 +2631,7 @@ void superprint (object *form, int lm, pfun_t pfun) {
       form = cdr(form);
     }
     pfun(')');
+    testescape();
   }
 }
 
@@ -3743,8 +3751,8 @@ object *fn_copylist (object *args, object *env) {
   if (!listp(arg)) error(notalist, arg);
   object *result = cons(NULL, NULL);
   object *ptr = result;
-  while (arg != NULL) {
-    cdr(ptr) = cons(car(arg), NULL); 
+  while (consp(arg)) {
+    cdr(ptr) = cons(car(arg), cdr(arg)); 
     ptr = cdr(ptr); arg = cdr(arg);
   }
   return cdr(result);
@@ -4404,8 +4412,10 @@ object *fn_stringgreatereq (object *args, object *env) {
   Destructively sorts list according to the test function, using an insertion sort, and returns the sorted list.
 */
 object *fn_sort (object *args, object *env) {
-  if (first(args) == NULL) return nil;
-  object *list = cons(nil,first(args));
+  object *arg = first(args);
+  if (!listp(arg)) error(notalist, arg);
+  if (arg == NULL) return nil;
+  object *list = cons(nil, arg);
   protect(list);
   object *predicate = second(args);
   object *compare = cons(NULL, cons(NULL, NULL));
@@ -4820,9 +4830,10 @@ object *fn_readline (object *args, object *env) {
 */
 object *fn_writebyte (object *args, object *env) {
   (void) env;
-  int value = checkinteger(first(args));
+  int c = checkinteger(first(args));
   pfun_t pfun = pstreamfun(cdr(args));
-  (pfun)(value);
+  if (c == '\n' && pfun == pserial) Serial.write('\n');
+  else (pfun)(c);
   return nil;
 }
 
@@ -5233,8 +5244,8 @@ object *fn_format (object *args, object *env) {
   object *formatstr = checkstring(second(args));
   object *save = NULL;
   args = cddr(args);
-  int len = stringlength(formatstr);
-  uint8_t n = 0, width = 0, w, bra = 0;
+  uint16_t len = stringlength(formatstr);
+  uint16_t n = 0, width = 0, w, bra = 0;
   char pad = ' ';
   bool tilde = false, mute = false, comma = false, quote = false;
   while (n < len) {
@@ -5828,8 +5839,12 @@ const char doc22[] PROGMEM = "(eq item item)\n"
 "or point to the same cons, and returns t or nil as appropriate.";
 const char doc23[] PROGMEM = "(car list)\n"
 "Returns the first item in a list.";
+const char doc24[] PROGMEM = "(first list)\n"
+"Returns the first item in a list. Equivalent to car.";
 const char doc25[] PROGMEM = "(cdr list)\n"
 "Returns a list with the first item removed.";
+const char doc26[] PROGMEM = "(rest list)\n"
+"Returns a list with the first item removed. Equivalent to cdr.";
 const char doc27[] PROGMEM = "(nth number list)\n"
 "Returns the nth item in list, counting from zero.";
 const char doc28[] PROGMEM = "(aref array index [index*])\n"
@@ -5935,6 +5950,8 @@ const char doc64[] PROGMEM = "(and item*)\n"
 "Evaluates its arguments until one returns nil, and returns the last value.";
 const char doc65[] PROGMEM = "(not item)\n"
 "Returns t if its argument is nil, or nil otherwise. Equivalent to null.";
+const char doc66[] PROGMEM = "(null list)\n"
+"Returns t if its argument is nil, or nil otherwise. Equivalent to not.";
 const char doc67[] PROGMEM = "(cons item item)\n"
 "If the second argument is a list, cons returns a new list with item added to the front of the list.\n"
 "If the second argument isn't a list cons returns a dotted pair.";
@@ -5961,6 +5978,8 @@ const char doc77[] PROGMEM = "(equal item item)\n"
 "or point to the same cons, and returns t or nil as appropriate.";
 const char doc78[] PROGMEM = "(caar list)";
 const char doc79[] PROGMEM = "(cadr list)";
+const char doc80[] PROGMEM = "(second list)\n"
+"Returns the second item in a list. Equivalent to cadr.";
 const char doc81[] PROGMEM = "(cdar list)\n"
 "Equivalent to (cdr (car list)).";
 const char doc82[] PROGMEM = "(cddr list)\n"
@@ -5973,6 +5992,8 @@ const char doc85[] PROGMEM = "(cadar list)\n"
 "Equivalent to (car (cdr (car list))).";
 const char doc86[] PROGMEM = "(caddr list)\n"
 "Equivalent to (car (cdr (cdr list))).";
+const char doc87[] PROGMEM = "(third list)\n"
+"Returns the third item in a list. Equivalent to caddr.";
 const char doc88[] PROGMEM = "(cdaar list)\n"
 "Equivalent to (cdar (car (car list))).";
 const char doc89[] PROGMEM = "(cdadr list)\n"
@@ -6259,9 +6280,9 @@ const tbl_entry_t lookup_table[] PROGMEM = {
   { string21, sp_defcode, 0307, doc21 },
   { string22, fn_eq, 0222, doc22 },
   { string23, fn_car, 0211, doc23 },
-  { string24, fn_car, 0211, NULL },
+  { string24, fn_car, 0211, doc24 },
   { string25, fn_cdr, 0211, doc25 },
-  { string26, fn_cdr, 0211, NULL },
+  { string26, fn_cdr, 0211, doc26 },
   { string27, fn_nth, 0222, doc27 },
   { string28, fn_aref, 0227, doc28 },
   { string29, fn_char, 0222, doc29 },
@@ -6301,7 +6322,7 @@ const tbl_entry_t lookup_table[] PROGMEM = {
   { string63, tf_case, 0117, doc63 },
   { string64, tf_and, 0107, doc64 },
   { string65, fn_not, 0211, doc65 },
-  { string66, fn_not, 0211, NULL },
+  { string66, fn_not, 0211, doc66 },
   { string67, fn_cons, 0222, doc67 },
   { string68, fn_atom, 0211, doc68 },
   { string69, fn_listp, 0211, doc69 },
@@ -6315,14 +6336,14 @@ const tbl_entry_t lookup_table[] PROGMEM = {
   { string77, fn_equal, 0222, doc77 },
   { string78, fn_caar, 0211, doc78 },
   { string79, fn_cadr, 0211, doc79 },
-  { string80, fn_cadr, 0211, NULL },
+  { string80, fn_cadr, 0211, doc80 },
   { string81, fn_cdar, 0211, doc81 },
   { string82, fn_cddr, 0211, doc82 },
   { string83, fn_caaar, 0211, doc83 },
   { string84, fn_caadr, 0211, doc84 },
   { string85, fn_cadar, 0211, doc85 },
   { string86, fn_caddr, 0211, doc86 },
-  { string87, fn_caddr, 0211, NULL },
+  { string87, fn_caddr, 0211, doc87 },
   { string88, fn_cdaar, 0211, doc88 },
   { string89, fn_cdadr, 0211, doc89 },
   { string90, fn_cddar, 0211, doc90 },
@@ -6606,6 +6627,9 @@ bool findsubstring (char *part, builtin_t name) {
 }
 
 void testescape () {
+  static unsigned long n;
+  if (millis()-n < 500) return;
+  n = millis();
   if (Serial.available() && Serial.read() == '~') error2(PSTR("escape!"));
 }
 
@@ -7026,6 +7050,7 @@ void plist (object *form, pfun_t pfun) {
   while (form != NULL && listp(form)) {
     pfun(' ');
     printobject(car(form), pfun);
+    testescape();
     form = cdr(form);
   }
   if (form != NULL) {
@@ -7391,7 +7416,6 @@ void initenv () {
   tee = bsymbol(TEE);
 }
 
-// Entry point from the Arduino IDE
 void setup () {
   Serial.begin(9600);
   int start = millis();
@@ -7399,7 +7423,7 @@ void setup () {
   initworkspace();
   initenv();
   initsleep();
-  pfstring(PSTR("uLisp 4.7 "), pserial); pln(pserial);
+  pfstring(PSTR("uLisp 4.7d "), pserial); pln(pserial);
 }
 
 // Read/Evaluate/Print loop
