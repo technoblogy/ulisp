@@ -1,5 +1,5 @@
-/* uLisp AVR Release 4.8a - www.ulisp.com
-   David Johnson-Davies - www.technoblogy.com - 7th July 2025
+/* uLisp AVR Release 4.8f - www.ulisp.com
+   David Johnson-Davies - www.technoblogy.com - 9th November 2025
    
    Licensed under the MIT license: https://opensource.org/licenses/MIT
 */
@@ -44,7 +44,7 @@ const char LispLibrary[] PROGMEM = "";
 
 #if defined(ARDUINO_AVR_MEGA2560)
   #include <EEPROM.h>
-  #define WORKSPACESIZE (1336-SDSIZE)     /* Objects (4*bytes) */
+  #define WORKSPACESIZE (1340-SDSIZE)     /* Objects (4*bytes) */
   #define EEPROMSIZE 4096                 /* Bytes */
   #define STACKDIFF 320
   #define CPU_ATmega2560
@@ -2143,7 +2143,7 @@ pfun_t pstreamfun (object *args) {
     nstream = stream>>8; address = stream & 0xFF;
   }
   bool n = nstream<USERSTREAMS;
-  pstream_ptr_t streamfunction = pgm_read_ptr(&streamtable(n?0:1)[n?nstream:nstream-USERSTREAMS].pfunptr);
+  pstream_ptr_t streamfunction = (pstream_ptr_t)pgm_read_ptr(&streamtable(n?0:1)[n?nstream:nstream-USERSTREAMS].pfunptr);
   pfun = streamfunction(address);
   return pfun;
 }
@@ -2157,7 +2157,7 @@ gfun_t gstreamfun (object *args) {
     nstream = stream>>8; address = stream & 0xFF;
   }
   bool n = nstream<USERSTREAMS;
-  gstream_ptr_t streamfunction = pgm_read_ptr(&streamtable(n?0:1)[n?nstream:nstream-USERSTREAMS].gfunptr);
+  gstream_ptr_t streamfunction = (gstream_ptr_t)pgm_read_ptr(&streamtable(n?0:1)[n?nstream:nstream-USERSTREAMS].gfunptr);
   gfun = streamfunction(address);
   return gfun;
 }
@@ -2255,7 +2255,7 @@ void initsleep () {
   set_sleep_mode(SLEEP_MODE_PWR_DOWN);
 }
 
-void sleep () {
+void gosleep () {
 #if defined(CPU_ATmega2560) || defined(CPU_ATmega1284P)
   ADCSRA = ADCSRA & ~(1<<ADEN); // Turn off ADC
   delay(100);  // Give serial time to settle
@@ -2272,7 +2272,7 @@ void doze (int secs) {
   // Set up Watchdog timer for 1 Hz interrupt
   WDTCSR = 1<<WDCE | 1<<WDE;
   WDTCSR = 1<<WDIE | 6<<WDP0;     // 1 sec interrupt
-  while (secs > 0) { sleep(); secs--; }
+  while (secs > 0) { gosleep(); secs--; }
   WDTCSR = 1<<WDCE | 1<<WDE;     // Disable watchdog
   WDTCSR = 0;
 #else
@@ -2363,9 +2363,9 @@ object *edit (object *fun) {
     char c = gserial();
     if (c == 'q') setflag(EXITEDITOR);
     else if (c == 'b') return fun;
-    else if (c == 'r') fun = read(gserial);
+    else if (c == 'r') fun = readmain(gserial);
     else if (c == '\n') { pfl(pserial); superprint(fun, 0, pserial); pln(pserial); }
-    else if (c == 'c') fun = cons(read(gserial), fun);
+    else if (c == 'c') fun = cons(readmain(gserial), fun);
     else if (atom(fun)) pserial('!');
     else if (c == 'd') fun = cons(car(fun), edit(cdr(fun)));
     else if (c == 'a') fun = cons(edit(car(fun)), cdr(fun));
@@ -2879,7 +2879,7 @@ object *sp_defcode (object *args, object *env) {
 
   // Compact the code block, removing gaps
   origin = 0;
-  object *block;
+  object *block = 0;
   int smallest;
 
   do {
@@ -3064,7 +3064,9 @@ object *fn_keywordp (object *args, object *env) {
   (void) env;
   object *arg = first(args);
   if (!symbolp(arg)) return nil;
-  return (keywordp(arg) || colonp(arg->name)) ? tee : nil;
+  if (colonp(arg->name)) return tee;
+  if (keywordp(arg)) return (number((int)lookupfn(builtin(arg->name))));
+  return nil;
 }
 
 object *fn_setfn (object *args, object *env) {
@@ -3928,6 +3930,7 @@ object *fn_terpri (object *args, object *env) {
 object *fn_readbyte (object *args, object *env) {
   (void) env;
   gfun_t gfun = gstreamfun(args);
+  if (gfun == gserial) gserial_flush();
   int c = gfun();
   return (c == -1) ? nil : number(c);
 }
@@ -3935,6 +3938,7 @@ object *fn_readbyte (object *args, object *env) {
 object *fn_readline (object *args, object *env) {
   (void) env;
   gfun_t gfun = gstreamfun(args);
+  if (gfun == gserial) gserial_flush();
   return readstring('\n', false, gfun);
 }
 
@@ -4147,7 +4151,7 @@ object *fn_millis (object *args, object *env) {
 
 object *fn_sleep (object *args, object *env) {
   (void) env;
-  if (args == NULL || first(args) == NULL) { sleep(); return nil; }
+  if (args == NULL || first(args) == NULL) { gosleep(); return nil; }
   object *arg1 = first(args);
   doze(checkinteger(arg1));
   return arg1;
@@ -4382,8 +4386,8 @@ object *sp_unwindprotect (object *args, object *env) {
   jmp_buf *previous_handler = handler;
   handler = &dynamic_handler;
   object *protected_form = first(args);
-  object *result;
-
+  object *volatile result;
+  // volatile to solve: argument 'result' might be clobbered by 'longjmp' or 'vfork' [-Wclobbered]
   bool signaled = false;
   if (!setjmp(dynamic_handler)) {
     result = eval(protected_form, env);
@@ -4406,6 +4410,8 @@ object *sp_unwindprotect (object *args, object *env) {
 }
 
 object *sp_ignoreerrors (object *args, object *env) {
+  object *volatile args1 = args;
+  // volatile to solve: argument 'args' might be clobbered by 'longjmp' or 'vfork' [-Wclobbered]
   object *current_GCStack = GCStack;
   jmp_buf dynamic_handler;
   jmp_buf *previous_handler = handler;
@@ -4414,12 +4420,13 @@ object *sp_ignoreerrors (object *args, object *env) {
 
   bool muffled = tstflag(MUFFLEERRORS);
   setflag(MUFFLEERRORS);
-  bool signaled = false;
+  volatile bool signaled = false;
+  // volatile to solve: argument 'signaled' might be clobbered by 'longjmp' or 'vfork' [-Wclobbered]
   if (!setjmp(dynamic_handler)) {
-    while (args != NULL) {
-      result = eval(car(args), env);
+    while (args1 != NULL) {
+      result = eval(car(args1), env);
       if (tstflag(RETURNFLAG)) break;
-      args = cdr(args);
+      args1 = cdr(args1);
     }
   } else {
     GCStack = current_GCStack;
@@ -4914,7 +4921,7 @@ const char doc72[] PROGMEM = "(arrayp item)\n"
 const char doc73[] PROGMEM = "(boundp item)\n"
 "Returns t if its argument is a symbol with a value.";
 const char doc74[] PROGMEM = "(keywordp item)\n"
-"Returns t if its argument is a built-in or user-defined keyword.";
+"Returns non-nil if its argument is a built-in or user-defined keyword.";
 const char doc75[] PROGMEM = "(set symbol value [symbol value]*)\n"
 "For each pair of arguments, assigns the value of the second argument to the value of the first argument.";
 const char doc76[] PROGMEM = "(streamp item)\n"
@@ -5705,7 +5712,7 @@ object *eval (object *form, object *env) {
     Context = bname;
     checkminmax(bname, nargs);
     intptr_t call = lookupfn(bname);
-    if (call == NULL) error(illegalfn, function);
+    if (call == 0) error(illegalfn, function);
     object *result = ((fn_ptr_type)call)(args, env);
     unprotect();
     return result;
@@ -6060,6 +6067,14 @@ void processkey (char c) {
   return;
 }
 
+void gserial_flush () {
+  #if defined (serialmonitor)
+  Serial.flush();
+  #endif
+  KybdAvailable = 0;
+  WritePtr = 0;
+}
+
 int gserial () {
 #if defined(lineeditor)
   while (!KybdAvailable) {
@@ -6227,7 +6242,6 @@ int glast () {
 
 object *readmain (gfun_t gfun) {
   GFun = gfun;
-  if (LastChar) { LastChar = 0; error2(PSTR("read can only be used with one stream at a time")); }
   LastChar = 0;
   return read(glast);
 }
@@ -6255,7 +6269,7 @@ void setup () {
   initworkspace();
   initenv();
   initsleep();
-  pfstring(PSTR("uLisp 4.8a "), pserial); pln(pserial);
+  pfstring(PSTR("uLisp 4.8f "), pserial); pln(pserial);
 }
 
 // Read/Evaluate/Print loop
