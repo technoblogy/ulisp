@@ -1,5 +1,5 @@
-/* uLisp AVR Release 4.8f - www.ulisp.com
-   David Johnson-Davies - www.technoblogy.com - 9th November 2025
+/* uLisp AVR Release 4.8g - www.ulisp.com
+   David Johnson-Davies - www.technoblogy.com - 2nd December 2025
    
    Licensed under the MIT license: https://opensource.org/licenses/MIT
 */
@@ -230,8 +230,9 @@ symbol_t Backtrace[BACKTRACESIZE];
 
 object *GlobalEnv;
 object *GCStack = NULL;
-object *GlobalString;
-object *GlobalStringTail;
+object *GlobalString = NULL;
+object *GlobalStringTail = NULL;
+object *GlobalStringStreamTail = NULL;
 int GlobalStringIndex = 0;
 uint8_t PrintCount = 0;
 uint8_t BreakLevel = 0;
@@ -337,6 +338,8 @@ const char indexrange[] PROGMEM = "index out of range";
 const char canttakecar[] PROGMEM = "can't take car";
 const char canttakecdr[] PROGMEM = "can't take cdr";
 const char unknownstreamtype[] PROGMEM = "unknown stream type";
+const char streamalreadyopen[] PROGMEM = "stream already in use";
+const char streamclosed[] PROGMEM = "invalid stream";
 
 // Set up workspace
 
@@ -1401,6 +1404,10 @@ void pstr (char c) {
   buildstring(c, &GlobalStringTail);
 }
 
+void pstrstream (char c) {
+  buildstring(c, &GlobalStringStreamTail);
+}
+
 object *lispstring (char *s) {
   object *obj = newstring();
   object *tail = obj;
@@ -2062,7 +2069,8 @@ pfun_t pfun_serial (uint8_t address) {
 
 pfun_t pfun_string (uint8_t address) {
   (void) address;
-  return pstr;
+  if (GlobalStringStreamTail == NULL) error2(streamclosed);
+  return pstrstream;
 }
 
 pfun_t pfun_sd (uint8_t address) {
@@ -2713,14 +2721,17 @@ object *sp_time (object *args, object *env) {
 
 object *sp_withoutputtostring (object *args, object *env) {
   object *params = checkarguments(args, 1, 1);
+  if (GlobalStringStreamTail != NULL) error2(streamalreadyopen);
   object *var = first(params);
   object *pair = cons(var, stream(STRINGSTREAM, 0));
   push(pair,env);
-  object *string = startstring();
+  object *string = newstring();
+  GlobalStringStreamTail = string;
   protect(string);
   object *forms = cdr(args);
   eval(tf_progn(forms,env), env);
   unprotect();
+  GlobalStringStreamTail = NULL;
   return string;
 }
 
@@ -6269,7 +6280,7 @@ void setup () {
   initworkspace();
   initenv();
   initsleep();
-  pfstring(PSTR("uLisp 4.8f "), pserial); pln(pserial);
+  pfstring(PSTR("uLisp 4.8g "), pserial); pln(pserial);
 }
 
 // Read/Evaluate/Print loop
@@ -6332,6 +6343,7 @@ void ulisperror () {
   delay(100); while (Serial.available()) Serial.read();
   #endif
   clrflag(NOESC); BreakLevel = 0; TraceStart = 0; TraceTop = 0;
+  GlobalStringStreamTail = NULL;
   for (int i=0; i<TRACEMAX; i++) TraceDepth[i] = 0;
   #if defined(sdcardsupport)
   SDpfile.close(); SDgfile.close();
